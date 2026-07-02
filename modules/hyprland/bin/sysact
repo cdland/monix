@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# sysact - simple power menu for Hyprland/tofi
+set -euo pipefail
+
+options=" Lock\n󰒲 Sleep\n󱣻 Hibernate\n Reboot\n⏻ Shutdown"
+
+choice=$(printf "%b" "$options" | tofi)
+
+[ -z "${choice:-}" ] && exit 0
+
+case "$choice" in
+" Lock")
+  hyprctl dispatch exec "hyprlock" || hyprlock &
+  ;;
+"󰒲 Sleep")
+  systemctl suspend
+  ;;
+"󱣻 Hibernate")
+  systemctl hibernate
+  ;;
+" Reboot")
+  systemctl reboot
+  ;;
+"⏻ Shutdown")
+  systemctl poweroff
+  ;;
+*)
+  exit 1
+  ;;
+esac

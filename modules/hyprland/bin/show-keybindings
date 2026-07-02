@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Display Hyprland keybindings via the compositor's live bind list, not by
+# parsing a config file. hyprland.lua is executed, not declaratively parsed,
+# so grepping it for `bind` lines (the old hyprlang-era approach) cannot see
+# binds set inside functions, loops, or required modules — hyprctl's own
+# view of what's actually bound is the only reliable source, and it works
+# the same way regardless of config language.
+#
+# `key` reports the bare key (e.g. "Q"), not the modifier combo — Hyprland
+# does not expose a decoded modifier-name string via hyprctl, only a raw
+# modmask integer, which is not a stable enough API to decode by hand here.
+# Each bind's `description` (see hyprland.mod.nix) carries the full
+# human-readable combo instead, so this only ever displays that.
+set -euo pipefail
+
+hyprctl binds -j |
+  jq -r '.[] | select(.description != "") | .description' |
+  flock --nonblock /tmp/.keybindings.lock -c "tofi --prompt-text 'Keybindings: '"
