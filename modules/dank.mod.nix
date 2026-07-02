@@ -26,6 +26,11 @@
           enable = true;
           compositor.name = "hyprland";
         };
+
+        # systemd user units don't inherit the session's XDG_DATA_DIRS on
+        # NixOS; without it the DMS launcher finds no .desktop entries.
+        systemd.user.services.dms.environment.XDG_DATA_DIRS =
+          "/etc/profiles/per-user/${config.primaryUser}/share:/run/current-system/sw/share";
       };
     };
 }
