@@ -126,6 +126,39 @@
           enable = true;
           configType = "lua";
 
+          # Deferred to the NixOS-level `programs.hyprland.enable` (see the
+          # nixosModules.hyprland aspect above), which installs the
+          # compositor and the Hyprland xdg-desktop-portal system-wide;
+          # setting these to null avoids a second, HM-managed copy of each
+          # package (see `wayland.windowManager.hyprland.package`'s
+          # description: "Set this to null if you use the NixOS module to
+          # install Hyprland.").
+          package = null;
+          portalPackage = null;
+
+          # Starts `hyprland-session.target` (BindsTo `graphical-session.target`)
+          # from Hyprland's own systemd startup hook, only after importing
+          # the listed variables into the systemd user manager and D-Bus
+          # activation environment (module default behavior; `variables`
+          # here only adds XDG_SESSION_ID to the module's default set).
+          # dms.service and ghostty.service are pulled in via
+          # `Install.WantedBy = [ "hyprland-session.target" ]` /
+          # `graphical-session.target`, so neither can start before this
+          # import completes — this is what structurally fixes the DMS
+          # logout button, whose `Hyprland.dispatch("exit")` IPC call needs
+          # HYPRLAND_INSTANCE_SIGNATURE.
+          systemd = {
+            enable = true;
+            variables = [
+              "DISPLAY"
+              "HYPRLAND_INSTANCE_SIGNATURE"
+              "WAYLAND_DISPLAY"
+              "XDG_CURRENT_DESKTOP"
+              "XDG_SESSION_TYPE"
+              "XDG_SESSION_ID"
+            ];
+          };
+
           settings = {
             env = [
               (mkEnv "GDK_SCALE" "2")
@@ -294,24 +327,16 @@
             ];
 
             # AUTOSTART — see the module-level comment for the dropped
-            # reload-restart behavior.
+            # reload-restart behavior. Session env import and dms/ghostty
+            # startup are no longer done here: they're handled by
+            # `wayland.windowManager.hyprland.systemd` (above) and by each
+            # unit's own `Install.WantedBy = hyprland-session.target` /
+            # `graphical-session.target` (see ghostty.mod.nix, dank.mod.nix).
             on = {
               _args = [
                 "hyprland.start"
                 (mkLuaInline ''
                   function()
-                    -- The `dms` shell runs as a systemd --user unit
-                    -- (PartOf=graphical-session.target), which starts with a
-                    -- minimal environment that lacks this login's session
-                    -- vars. DMS's power-menu logout calls
-                    -- `Hyprland.dispatch("exit")` via Quickshell's Hyprland
-                    -- IPC client, which needs HYPRLAND_INSTANCE_SIGNATURE to
-                    -- find the socket; that (and the other vars below) are
-                    -- only known once Hyprland itself has started. Import
-                    -- them into the user manager and bounce dms so it picks
-                    -- them up.
-                    hl.exec_cmd("bash -c 'dbus-update-activation-environment --systemd WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP XDG_SESSION_ID DISPLAY 2>/dev/null; systemctl --user try-restart dms.service'")
-                    hl.exec_cmd("systemctl --user start ghostty.service")
                     hl.exec_cmd("hyprsunset -t 4500")
                     hl.exec_cmd("wl-clip-persist --clipboard regular")
                     hl.exec_cmd("bash -c 'wl-paste --watch cliphist store &'")

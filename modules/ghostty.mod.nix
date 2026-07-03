@@ -45,19 +45,21 @@
           systemd.enable = false;
         };
 
-        # Daemon started explicitly from Hyprland's autostart (after the
-        # session env import, since the unit needs WAYLAND_DISPLAY — see
-        # hyprland.mod.nix), not via Install.WantedBy.
+        # Ordered after hyprland-session.target, which only becomes active
+        # once Hyprland's own systemd startup hook has imported the session
+        # environment (WAYLAND_DISPLAY, etc.) into the systemd user manager
+        # — see `wayland.windowManager.hyprland.systemd` in hyprland.mod.nix.
         systemd.user.services.ghostty = {
           Unit = {
             Description = "Ghostty terminal daemon";
-            After = [ "graphical-session.target" ];
-            PartOf = [ "graphical-session.target" ];
+            After = [ "hyprland-session.target" ];
+            PartOf = [ "hyprland-session.target" ];
           };
           Service = {
             ExecStart = getExe config.programs.ghostty.package;
             Restart = "on-failure";
           };
+          Install.WantedBy = [ "hyprland-session.target" ];
         };
       };
     };
