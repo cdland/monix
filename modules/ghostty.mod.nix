@@ -7,12 +7,14 @@
 {
   flake.homeModules.ghostty =
     {
+      config,
       lib,
       osConfig,
       ...
     }:
     let
       inherit (lib.modules) mkIf;
+      inherit (lib.meta) getExe;
     in
     {
       config = mkIf osConfig.isDesktop {
@@ -29,6 +31,28 @@
             font-size = 10;
 
             keybind = [ "ctrl+k=reset" ];
+
+            # Run as a GTK single-instance daemon (see the systemd service
+            # below): further launches just open a new window in the running
+            # process instead of paying startup cost each time.
+            gtk-single-instance = true;
+            quit-after-last-window-closed = false;
+            initial-window = false;
+          };
+        };
+
+        # Daemon started explicitly from Hyprland's autostart (after the
+        # session env import, since the unit needs WAYLAND_DISPLAY — see
+        # hyprland.mod.nix), not via Install.WantedBy.
+        systemd.user.services.ghostty = {
+          Unit = {
+            Description = "Ghostty terminal daemon";
+            After = [ "graphical-session.target" ];
+            PartOf = [ "graphical-session.target" ];
+          };
+          Service = {
+            ExecStart = getExe config.programs.ghostty.package;
+            Restart = "on-failure";
           };
         };
       };

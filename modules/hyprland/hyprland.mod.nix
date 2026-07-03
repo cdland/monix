@@ -311,6 +311,7 @@
                     -- them into the user manager and bounce dms so it picks
                     -- them up.
                     hl.exec_cmd("bash -c 'systemctl --user import-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP XDG_SESSION_ID DISPLAY 2>/dev/null; systemctl --user try-restart dms.service'")
+                    hl.exec_cmd("systemctl --user start ghostty.service")
                     hl.exec_cmd("hyprsunset -t 4500")
                     hl.exec_cmd("wl-clip-persist --clipboard regular")
                     hl.exec_cmd("bash -c 'wl-paste --watch cliphist store &'")
