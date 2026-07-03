@@ -56,7 +56,6 @@
     {
       config = mkIf osConfig.isDesktop {
         home.packages = [
-          pkgs.blueman
           pkgs.brightnessctl
           pkgs.cliphist
           pkgs.hyprpicker

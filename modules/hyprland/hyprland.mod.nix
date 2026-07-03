@@ -35,7 +35,23 @@
         programs.uwsm.waylandCompositors.hyprland = {
           prettyName = "Hyprland";
           comment = "Hyprland compositor managed by UWSM";
-          binPath = lib.getExe' pkgs.hyprland "Hyprland";
+          # Point at start-hyprland, not the raw Hyprland binary. Hyprland's
+          # main() only clears its "started without start-hyprland" warning
+          # when handed a valid `--watchdog-fd` (src/main.cpp: `watchdogOk =
+          # watchdogFd > 0`); that fd is a pipe start-hyprland itself creates
+          # and passes when it forks+execs Hyprland, so no env var can
+          # substitute for it. start-hyprland is otherwise just a crash-restart
+          # watchdog around Hyprland (start/src/core/Instance.cpp: fork/exec
+          # loop, `while(true)` restart-on-unclean-exit) — it does no
+          # systemd/target manipulation of its own, so nesting it inside the
+          # uwsm-managed unit is safe. This matches upstream guidance: the
+          # Hyprland wiki's Systemd-start page (linked from nixpkgs'
+          # `programs.hyprland.withUWSM` description) and maintainer fufexan
+          # (github.com/hyprwm/Hyprland/discussions/12661) both say to launch
+          # `start-hyprland` under uwsm rather than the bare binary; suppressing
+          # the warning via `misc:disable_watchdog_warning` is called out there
+          # as the less-recommended alternative.
+          binPath = lib.getExe' pkgs.hyprland "start-hyprland";
         };
 
         hardware.graphics.enable = true;
