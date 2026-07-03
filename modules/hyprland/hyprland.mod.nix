@@ -220,6 +220,10 @@
                 disable_splash_rendering = true;
               };
 
+              cursor = {
+                inactive_timeout = 5;
+              };
+
               xwayland.force_zero_scaling = true;
 
               ecosystem.no_update_news = true;
