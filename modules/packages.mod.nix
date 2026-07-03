@@ -57,6 +57,7 @@
       config = mkIf osConfig.isDesktop {
         home.packages = [
           pkgs.brightnessctl
+          pkgs.claude-code
           pkgs.cliphist
           pkgs.kdePackages.dolphin
           pkgs.hyprpicker
