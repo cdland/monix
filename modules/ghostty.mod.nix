@@ -38,10 +38,11 @@
           # Those flags belong only on the daemon's ExecStart, which is why we
           # use upstream's systemd unit (default `systemd.enable = true`)
           # instead of hand-rolling one. It's WantedBy=graphical-session.target
-          # and After=graphical-session.target, which is safe now that
-          # hyprland-session.target bounces graphical-session.target after the
-          # session env import (see `wayland.windowManager.hyprland.systemd`
-          # in hyprland.mod.nix).
+          # and After=graphical-session.target, which is safe now that UWSM
+          # (not this module's own `hyprland-session.target` hook, which is
+          # disabled — see `wayland.windowManager.hyprland.systemd` in
+          # hyprland.mod.nix) brings up `graphical-session.target` only after
+          # `uwsm finalize` has exported session vars.
         };
       };
     };

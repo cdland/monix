@@ -17,6 +17,27 @@
       config = mkIf config.isDesktop {
         programs.hyprland.enable = true;
 
+        # UWSM (Universal Wayland Session Manager) now owns the systemd
+        # session lifecycle instead of the home-manager Hyprland module's own
+        # hook (see the homeModules.hyprland aspect below). In this nixpkgs
+        # pin, `withUWSM` by itself only flips `programs.uwsm.enable`; it does
+        # NOT register Hyprland with UWSM or add a session entry (confirmed
+        # by reading nixos/modules/programs/wayland/hyprland.nix: the
+        # `withUWSM` mkIf block is just `{ programs.uwsm.enable = true; }`).
+        # The `waylandCompositors.hyprland` entry below is what actually
+        # generates the "Hyprland (UWSM)" wayland-sessions/*.desktop entry
+        # (`Exec = uwsm start -F -- <binPath>`); without it the greeter would
+        # have no way to launch Hyprland under UWSM at all. The original,
+        # non-UWSM "Hyprland" entry (from `services.displayManager.sessionPackages`,
+        # set by the base hyprland.nix module) stays installed alongside it —
+        # withUWSM adds a session, it does not replace one.
+        programs.hyprland.withUWSM = true;
+        programs.uwsm.waylandCompositors.hyprland = {
+          prettyName = "Hyprland";
+          comment = "Hyprland compositor managed by UWSM";
+          binPath = lib.getExe' pkgs.hyprland "Hyprland";
+        };
+
         hardware.graphics.enable = true;
 
         xdg.portal.enable = true;
@@ -127,28 +148,27 @@
           package = null;
           portalPackage = null;
 
-          # Starts `hyprland-session.target` (BindsTo `graphical-session.target`)
-          # from Hyprland's own systemd startup hook, only after importing
-          # the listed variables into the systemd user manager and D-Bus
-          # activation environment (module default behavior; `variables`
-          # here only adds XDG_SESSION_ID to the module's default set).
-          # dms.service and ghostty.service are pulled in via
-          # `Install.WantedBy = [ "hyprland-session.target" ]` /
-          # `graphical-session.target`, so neither can start before this
-          # import completes — this is what structurally fixes the DMS
-          # logout button, whose `Hyprland.dispatch("exit")` IPC call needs
-          # HYPRLAND_INSTANCE_SIGNATURE.
-          systemd = {
-            enable = true;
-            variables = [
-              "DISPLAY"
-              "HYPRLAND_INSTANCE_SIGNATURE"
-              "WAYLAND_DISPLAY"
-              "XDG_CURRENT_DESKTOP"
-              "XDG_SESSION_TYPE"
-              "XDG_SESSION_ID"
-            ];
-          };
+          # UWSM owns the systemd session now (see the NixOS-level
+          # `programs.hyprland.withUWSM` / `programs.uwsm.waylandCompositors.hyprland`
+          # in the nixosModules.hyprland aspect above): the "Hyprland (UWSM)"
+          # session entry runs `uwsm start -F -- Hyprland`, which launches the
+          # compositor inside `wayland-wm@Hyprland.service` and brings up
+          # `graphical-session-pre.target` / `graphical-session.target` /
+          # `xdg-desktop-autostart.target` itself. This module's own hook
+          # (`hyprland-session.target`, BindsTo `graphical-session.target`)
+          # would be redundant with — and would race — that, so it's disabled
+          # here. Session env export is instead done by `uwsm finalize`, the
+          # first autostart line below: WAYLAND_DISPLAY/DISPLAY are handled by
+          # uwsm automatically, HYPRLAND_INSTANCE_SIGNATURE (needed by the DMS
+          # logout button's `Hyprland.dispatch("exit")` IPC call),
+          # HYPRCURSOR_THEME/SIZE and XCURSOR_THEME/SIZE are added
+          # automatically by uwsm's built-in hyprland.sh plugin
+          # (`UWSM_FINALIZE_VARNAMES`); XDG_CURRENT_DESKTOP, XDG_SESSION_TYPE
+          # and XDG_SESSION_ID are passed explicitly to `uwsm finalize` to
+          # preserve this module's prior variable-import behavior (uwsm
+          # finalize silently skips undefined vars, so this is safe even if
+          # one of them isn't set).
+          systemd.enable = false;
 
           settings = {
             env = [
@@ -322,19 +342,38 @@
             ];
 
             # AUTOSTART — see the module-level comment for the dropped
-            # reload-restart behavior. Session env import and dms/ghostty
-            # startup are no longer done here: they're handled by
-            # `wayland.windowManager.hyprland.systemd` (above) and by each
-            # unit's own `Install.WantedBy = hyprland-session.target` /
-            # `graphical-session.target` (see ghostty.mod.nix, dank.mod.nix).
+            # reload-restart behavior. dms/ghostty startup are not done here:
+            # they're handled by each unit's own
+            # `Install.WantedBy = graphical-session.target` (see
+            # ghostty.mod.nix, dank.mod.nix), which UWSM now brings up (see
+            # `wayland.windowManager.hyprland.systemd` above).
+            #
+            # `uwsm finalize` MUST run first, and only once
+            # `HYPRLAND_INSTANCE_SIGNATURE` etc. actually exist — it exports
+            # session vars to the systemd/D-Bus activation environment and
+            # signals `wayland-wm@Hyprland.service` ready, unblocking
+            # graphical-session.target and everything WantedBy it.
+            #
+            # Long-running autostarts are wrapped in `uwsm app --`, per uwsm
+            # convention, so they run as their own transient systemd scopes
+            # under the session (tracked/cleaned up by systemd) rather than as
+            # bare children of Hyprland. Keybind execs are deliberately left
+            # unwrapped (see the bind list below) — `uwsm app` is for
+            # long-lived autostarts, not one-shot interactive launches.
+            #
+            # hyprsunset is dropped in favor of DMS's built-in night mode
+            # (DisplayService.qml's `wayland.gamma.*` calls), which talks
+            # directly to the compositor over the `wlr-gamma-control-unstable-v1`
+            # Wayland protocol from the `dms` daemon — no external process,
+            # and Hyprland natively implements that protocol.
             on = {
               _args = [
                 "hyprland.start"
                 (mkLuaInline ''
                   function()
-                    hl.exec_cmd("${getExe pkgs.hyprsunset} -t 4500")
-                    hl.exec_cmd("${getExe pkgs.wl-clip-persist} --clipboard regular")
-                    hl.exec_cmd("bash -c '${getExe' pkgs.wl-clipboard "wl-paste"} --watch ${getExe pkgs.cliphist} store &'")
+                    hl.exec_cmd("${getExe pkgs.uwsm} finalize XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_ID")
+                    hl.exec_cmd("${getExe pkgs.uwsm} app -- ${getExe pkgs.wl-clip-persist} --clipboard regular")
+                    hl.exec_cmd("${getExe pkgs.uwsm} app -- ${getExe' pkgs.wl-clipboard "wl-paste"} --watch ${getExe pkgs.cliphist} store")
                   end
                 '')
               ];

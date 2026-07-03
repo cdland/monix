@@ -61,7 +61,6 @@
           pkgs.cliphist
           pkgs.hyprpicker
           pkgs.hyprshot
-          pkgs.hyprsunset
           pkgs.nautilus
           pkgs.pamixer
           pkgs.pavucontrol
