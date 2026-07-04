@@ -238,7 +238,13 @@
               (mkEnv "MOZ_ENABLE_WAYLAND" "1")
               (mkEnv "ELECTRON_OZONE_PLATFORM_HINT" "wayland")
               (mkEnv "OZONE_PLATFORM" "wayland")
-              (mkEnv "XDG_DATA_DIRS" "$XDG_DATA_DIRS:/etc/profiles/per-user/$USER/share:/run/current-system/sw/share")
+              # Statically expanded: Hyprland's `env` does no shell expansion,
+              # so `$VAR` references would propagate literally into the session
+              # (uwsm finalize exports them; nvim then tries to shell-expand
+              # its runtimepath and dies with E79 under non-POSIX shells).
+              (mkEnv "XDG_DATA_DIRS"
+                "/etc/profiles/per-user/${osConfig.primaryUser}/share:/run/current-system/sw/share"
+              )
               (mkEnv "EDITOR" "nvim")
               (mkEnv "GTK_THEME" "Adwaita:dark")
             ];
