@@ -10,9 +10,9 @@
     {
       environment.variables.EDITOR = "nvim";
 
+      # neovim deliberately absent: NvChad's wrapper provides `nvim` per-user
+      # (see editors.mod.nix) and collides with a plain install.
       environment.systemPackages = [
-        pkgs.helix
-        pkgs.neovim
         pkgs.vim
       ];
     };
@@ -69,6 +69,7 @@
       environment.systemPackages = [
         pkgs.git
         pkgs.gnumake
+        pkgs.jujutsu
       ];
     };
 
@@ -122,6 +123,8 @@
           pkgs.brave
           pkgs.kdePackages.dolphin
           pkgs.keepassxc
+          pkgs.libreoffice
+          pkgs.obsidian
         ];
       };
     };
