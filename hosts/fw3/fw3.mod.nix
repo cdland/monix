@@ -68,8 +68,9 @@ in
         # DESKTOP EXTRAS
         programs.steam.enable = true;
 
-        # USER
-        users.users.${config.primaryUser}.shell = pkgs.nushell;
+        # USER: login shell is NixOS's default (bash) — a plain POSIX $SHELL
+        # for tools that shell out (nvim, lf, tmux). The interactive shell is
+        # nushell, launched by ghostty (see ghostty.mod.nix).
 
         system.stateVersion = "26.05";
       }

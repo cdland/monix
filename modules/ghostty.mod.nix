@@ -9,6 +9,7 @@
     {
       lib,
       osConfig,
+      pkgs,
       ...
     }:
     let
@@ -20,6 +21,12 @@
           enable = true;
 
           settings = {
+            # Interactive shell for terminal windows only. The LOGIN shell
+            # stays POSIX (bash, the NixOS default): tools that shell out via
+            # $SHELL (nvim's wildcard expansion, :!, lf, ...) break under
+            # nushell.
+            command = lib.meta.getExe pkgs.nushell;
+
             window-padding-x = 14;
             window-padding-y = 14;
             background-opacity = 0.95;
