@@ -37,9 +37,15 @@
 
         # Wallpaper-synced app theming (Settings -> Theme & Colors -> "Apply
         # GTK/Qt Themes"). enableDynamicTheming provides matugen; adw-gtk3 is
-        # the GTK theme DMS's generated gtk.css targets; kdePackages.qt6ct is
-        # the qt6ct-kde fork (plain qt6ct can't read the KColorScheme file DMS
-        # generates); qt5ct covers remaining Qt5 apps. DMS owns the generated
+        # the GTK theme DMS's generated gtk.css targets; qt5ct covers
+        # remaining Qt5 apps.
+        #
+        # TODO(qt-theming): nixpkgs' kdePackages.qt6ct is built WITHOUT the
+        # fork's KDE/KColorScheme support (nixpkgs issue #489021), so DMS's
+        # "Apply Qt Themes" silently does nothing for Qt6 apps. Revisit:
+        # either overlay qt6ct with the KDE patch (see the AUR qt6ct-kde
+        # recipe) or switch to DMS's QT_QPA_PLATFORMTHEME=gtk3 passthrough.
+        # GTK theming is unaffected. DMS owns the generated
         # files at runtime (gtk.css, qt5ct/qt6ct configs, color schemes) —
         # nothing under home-manager may manage those paths.
         programs.dms-shell.enableDynamicTheming = true;
