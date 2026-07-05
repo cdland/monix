@@ -1,4 +1,4 @@
-# Config-less packages, grouped into functional bundles (ncc's pattern). Tools
+# Config-less packages, grouped into functional bundles. Tools
 # that carry configuration have their own concern files; Nix-workflow tools
 # (nh, nix-output-monitor) live in nix.mod.nix; fonts in fonts.mod.nix.
 #

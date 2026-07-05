@@ -1,8 +1,7 @@
 # nix-config
 
 A single-repo, modular NixOS configuration built on the **Dendritic Pattern**
-(flake-parts with `*.mod.nix` auto-discovery), modelled on the structure of
-[RGBCube/ncc](https://github.com/RGBCube/ncc). It is Linux-only and designed so
+(flake-parts with `*.mod.nix` auto-discovery). It is Linux-only and designed so
 that adding a host is a few lines.
 
 Hosts: **fw3** (Framework 13 AMD 7040 running a Hyprland desktop shelled by
@@ -21,7 +20,7 @@ registers *aspects* into one of three collections:
   enabled.
 - `homeModules` — Home Manager aspects applied to the primary user.
 
-Packages follow ncc's convention: a tool that carries configuration gets its own
+Packages follow one convention: a tool that carries configuration gets its own
 concern file with package and settings together (`modules/git.mod.nix`,
 `modules/ghostty.mod.nix`); config-less tools are grouped in
 `modules/packages.mod.nix` as functional bundles; Nix-workflow tools sit with the
@@ -38,13 +37,18 @@ class and hardware, and enables the services it wants:
 ```nix
 imports =
   attrValues self.commonModules
-  ++ attrValues self.nixosModules
-  ++ singleton ./hardware-configuration.nix;
+  ++ attrValues self.nixosModules;
 
 isDesktop = true;            # or false for a server
 nixpkgs.hostPlatform = "x86_64-linux";
+disko.devices.disk.main = { ... };   # declarative disk layout (see disko.mod.nix)
 system.stateVersion = "26.05";
 ```
+
+There is no `hardware-configuration.nix`: the host module carries the few
+per-machine hardware facts (initrd kernel modules, microcode) directly, and
+the disk layout is declared with disko, which both generates the mount config
+and can format a blank disk to match.
 
 ### Desktop vs server
 
@@ -58,9 +62,10 @@ flag false. Service aspects (LiteLLM, Open WebUI, Tailscale) gate on their own
 
 1. `mkdir hosts/<name>` and create `hosts/<name>/<name>.mod.nix` (copy fw3 or
    vs0). Set `isDesktop`, `nixpkgs.hostPlatform`, `system.stateVersion`.
-2. Drop the machine's real hardware config into
-   `hosts/<name>/hardware-configuration.nix`
-   (`nixos-generate-config --show-hardware-config`).
+2. Set the hardware facts and disko layout in the host module (crib the
+   kernel-module list from `nixos-generate-config --show-hardware-config` on
+   the machine; point `disko.devices.disk.main.device` at the disk's
+   `/dev/disk/by-id/...` path).
 3. Add the host's SSH host public key to `keys.nix` under `hosts.<name>`.
 4. Add the host's secret rules to `secrets.nix` and create the secrets.
 5. Build: `nixos-rebuild switch --flake .#<name>`.
@@ -140,24 +145,26 @@ nix flake check                          # evaluate everything
 nixos-rebuild switch --flake .#fw3       # or .#vs0
 ```
 
-For a first install, build an installer ISO or use `nixos-anywhere`; this repo
-does not bundle disk provisioning (see "Differences from ncc").
+First install of a host, from any NixOS installer ISO (formats the disk
+declared in the host's disko layout — destructive, check the device path):
 
-## Differences from ncc (deliberate)
+```sh
+sudo nix run github:nix-community/disko -- --mode disko --flake .#<host>
+sudo nixos-install --flake .#<host>
+```
 
-- **No darwin/macOS** — removed as requested.
-- **`isDesktop` flag** with `mkIf` gating instead of ncc's per-host
-  `removeAttrs` aspect menus — simpler and as requested.
-- **Home Manager** instead of ncc's hjem/hjem-rum — much better Hyprland
-  support; the `homeModules` aspect design is preserved.
-- **Omitted** ncc-specific subsystems to keep this lean and buildable out of the
-  box: bcachefs-backed `persist`, `disko` image builders, `nixos-facter`, the
-  deterministic-MAC `magic` lib, ThemeNix, and the Nushell suite. Standard
-  `hardware-configuration.nix` is used per host. Add any of these back as new
-  `*.mod.nix` aspects if you want them.
+## Design choices (deliberate)
+
+- **Linux-only** — no darwin/macOS support.
+- **`isDesktop` flag** with `mkIf` gating rather than per-host aspect menus —
+  every aspect is imported everywhere and gates itself.
+- **Home Manager** for the user session (best Hyprland support), organised as
+  `homeModules` aspects.
+- **No hardware-configuration.nix / nixos-facter** — per-host hardware facts
+  live directly in the host module; disk layouts are declared with disko.
 - **Explicit `secrets.nix` rules** (so `agenix -e` works when first creating a
-  secret) rather than ncc's scan-existing-files approach; agenix identity is the
-  system SSH host key rather than a separate key partition.
+  secret); agenix identity is the system SSH host key rather than a separate
+  key partition.
 - **No pipe operators** — see AGENTS.md.
 
 ## Hyprland notes

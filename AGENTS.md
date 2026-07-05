@@ -72,9 +72,8 @@ unrelated module.
   `osConfig.isDesktop`. There is no host-class (`server`/`desktop`) partition of
   packages; differentiation comes from the per-aspect gate.
 
-This mirrors ncc's layout. ncc's home aspects use hjem (`packages = [ … ]`,
-`xdg.config.files`); this repo uses home-manager, so the same organisation is
-expressed with `home.packages` and `programs.<tool>`.
+Home aspects are expressed with home-manager (`home.packages`,
+`programs.<tool>`).
 
 ## Secrets
 
@@ -84,7 +83,7 @@ Reference secrets in modules as `config.secrets.<name>.path`.
 
 ## Pipe operators
 
-ncc uses Nix pipe operators (`|>`, `<|`). This repository avoids them so the
+This repository avoids Nix pipe operators (`|>`, `<|`) so the
 flake evaluates without the `pipe-operators` experimental feature enabled. If
 you adopt them, add `pipe-operators` to `nix.settings.experimental-features` and
 to the flake's `nixConfig`.
