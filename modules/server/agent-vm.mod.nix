@@ -183,6 +183,7 @@
                     ''}
                   } > /run/agent-env
                   chown agent:users /run/agent-env
+                  chmod 0400 /run/agent-env
                   install -d -m 0700 -o agent -g users /home/agent/.codex
                   install -m 0400 -o agent -g users ${guestCredsMount}/codex-auth.json /home/agent/.codex/auth.json
                 '';
@@ -298,7 +299,9 @@
                 RemainAfterExit = true;
               };
               script = ''
-                install -d -m 0700 ${credsDir w.name}
+                # -o/-g matter: microvm.nix pre-creates share sources owned
+                # by the microvm user; this directory must stay root-only.
+                install -d -m 0700 -o root -g root ${credsDir w.name}
                 install -m 0400 ${cfg.credentials.claudeTokenFile} ${credsDir w.name}/claude-token
                 install -m 0400 ${cfg.credentials.codexAuthFile} ${credsDir w.name}/codex-auth.json
                 ${optionalString (w.patFile != null) ''
