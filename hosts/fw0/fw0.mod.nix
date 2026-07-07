@@ -58,10 +58,22 @@ in
         hardware.enableRedistributableFirmware = true;
         networking.useDHCP = lib.mkDefault true;
 
-        # DISK — PLACEHOLDER device. No LUKS: the host must auto-boot
-        # unattended after a power loss and there is no console attached to
-        # type a passphrase (revisit with TPM auto-unlock if encryption at
-        # rest becomes a requirement).
+        # ENCRYPTED ROOT with TPM2 auto-unlock. The btrfs root lives inside a
+        # LUKS container ("cryptroot"); the decryption key is sealed into the
+        # board's TPM (enrolled once, post-install, with
+        # `systemd-cryptenroll --tpm2-device=auto /dev/<root-part>`), so the
+        # host still auto-boots headless after a power loss — the TPM releases
+        # the key with no passphrase. A pull-the-drive attacker gets only
+        # ciphertext (no TPM, no key). A LUKS passphrase slot is kept at format
+        # time as the recovery key (used if the TPM state is ever cleared,
+        # e.g. by a firmware reset); store it somewhere safe off-box.
+        #
+        # `crypttab-extra-opts tpm2-device=auto` makes the systemd-based initrd
+        # try the TPM first. It requires `boot.initrd.systemd.enable` (below).
+        # NOTE: enroll the TPM in the installer BEFORE the first reboot, or the
+        # first headless boot will hang waiting for the passphrase.
+        boot.initrd.systemd.enable = true;
+
         disko.devices.disk.main = {
           device = "/dev/disk/by-id/nvme-Samsung_SSD_980_PRO_with_Heatsink_2TB_S6WRNS0T219958J";
           type = "disk";
@@ -84,24 +96,39 @@ in
             };
           };
 
-          content.partitions.root = {
+          content.partitions.luks = {
             priority = 200;
             size = "100%";
 
             content = {
-              type = "btrfs";
+              type = "luks";
+              name = "cryptroot";
 
-              # Dedicated datasets so the agent subsystem (scratch images,
-              # session logs, caches) and model weights are separable and
-              # snapshot/quota-able independently of the root.
-              subvolumes."@" = {
-                mountpoint = "/";
+              # Read at format time only (a temp recovery passphrase the
+              # installer writes here); never committed. TPM enrollment
+              # replaces it as the normal unlock path.
+              passwordFile = "/tmp/luks.key";
+
+              settings = {
+                allowDiscards = true;
+                crypttabExtraOpts = [ "tpm2-device=auto" ];
               };
-              subvolumes."@agents" = {
-                mountpoint = "/var/lib/agents";
-              };
-              subvolumes."@models" = {
-                mountpoint = "/var/lib/models";
+
+              content = {
+                type = "btrfs";
+
+                # Dedicated datasets so the agent subsystem (scratch images,
+                # session logs, caches) and model weights are separable and
+                # snapshot/quota-able independently of the root.
+                subvolumes."@" = {
+                  mountpoint = "/";
+                };
+                subvolumes."@agents" = {
+                  mountpoint = "/var/lib/agents";
+                };
+                subvolumes."@models" = {
+                  mountpoint = "/var/lib/models";
+                };
               };
             };
           };
