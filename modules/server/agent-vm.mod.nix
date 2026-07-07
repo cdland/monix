@@ -48,9 +48,10 @@
 
       # Per-worker task exchange: the dispatcher (agent-dispatch.mod.nix)
       # writes prompt.md here before booting the VM; the guest's agent-task
-      # unit writes report.md/agent.log/exit-code back. The guest `agent`
-      # user is uid 1000/gid 100, which passes through virtiofs verbatim, so
-      # the host-side directory is owned by uid 1000.
+      # unit writes report.md/agent.log/exit-code back, and ask-cockpit
+      # exchanges question-N.md/answer-N.md through it mid-task. The guest
+      # `agent` user is uid 1000/gid 100, which passes through virtiofs
+      # verbatim, so the host-side directory is owned by uid 1000.
       workDir = name: "/var/lib/agents/work/${name}/task";
       guestTaskMount = "/run/task";
 
@@ -93,6 +94,40 @@
 
           config =
             { pkgs, ... }:
+            let
+              # Mid-task escalation: writes a question into the task share and
+              # blocks until the host's guidance service (agent-dispatch.mod.nix)
+              # answers it with a stronger model. Capped per task so a confused
+              # agent can't burn the cockpit's quota in a loop.
+              askCockpit = pkgs.writeShellApplication {
+                name = "ask-cockpit";
+                text = ''
+                  if [ $# -lt 1 ]; then
+                    echo "usage: ask-cockpit <question...>" >&2
+                    exit 2
+                  fi
+                  task=${guestTaskMount}
+                  n=1
+                  while [ -e "$task/question-$n.md" ] || [ -e "$task/answer-$n.md" ]; do
+                    n=$((n + 1))
+                    if [ "$n" -gt 5 ]; then
+                      echo "guidance limit (5 questions) reached for this task; proceed on your best judgment" >&2
+                      exit 1
+                    fi
+                  done
+                  printf '%s\n' "$*" > "$task/question-$n.md.tmp"
+                  mv "$task/question-$n.md.tmp" "$task/question-$n.md"
+                  for _ in $(seq 1 180); do
+                    if [ -e "$task/answer-$n.md" ]; then
+                      cat "$task/answer-$n.md"
+                      exit 0
+                    fi
+                    sleep 5
+                  done
+                  echo "no guidance arrived within 15 minutes; proceed on your best judgment"
+                '';
+              };
+            in
             {
               microvm = {
                 hypervisor = "cloud-hypervisor";
@@ -167,6 +202,7 @@
               // optionalAttrs (repo != null) { AGENT_REPO = "https://github.com/${repo}.git"; };
 
               environment.systemPackages = [
+                askCockpit
                 pkgs.claude-code
                 pkgs.codex
                 pkgs.git
@@ -270,6 +306,7 @@
 
                   rc=0
                   claude -p "$(cat /tmp/prompt-body.md)" ''${model:+--model "$model"} \
+                    --append-system-prompt 'If you are stuck, need a decision above your pay grade, or want a second opinion, run `ask-cockpit "<your question>"` in the shell: it consults a stronger supervising model and prints its guidance (allow a few minutes). At most 5 questions per task.' \
                     > ${guestTaskMount}/report.md \
                     2> ${guestTaskMount}/agent.log || rc=$?
                   echo "$rc" > ${guestTaskMount}/exit-code

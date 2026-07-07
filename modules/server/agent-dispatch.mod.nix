@@ -101,9 +101,9 @@
               fi
               install -d "$out"
               mv "$running/$id.md" "$out/prompt.md"
-              for f in report.md agent.log exit-code; do
-                if [ -f "$work/$f" ]; then
-                  install -m 0644 "$work/$f" "$out/$f"
+              for f in "$work"/report.md "$work"/agent.log "$work"/exit-code "$work"/answer-*.md; do
+                if [ -f "$f" ]; then
+                  install -m 0644 "$f" "$out/$(basename "$f")"
                 fi
               done
               reset_work
@@ -117,6 +117,12 @@
         type = types.int;
         default = 5400;
         description = "seconds a task may run before the worker is stopped and the task filed as failed";
+      };
+
+      options.agentFleet.guidanceModel = mkOption {
+        type = types.str;
+        default = "opus";
+        description = "model that answers workers' ask-cockpit questions";
       };
 
       config = mkIf (cfg.enable && cfg.workers != [ ]) {
@@ -135,6 +141,12 @@
           pathConfig.DirectoryNotEmpty = "${tasksDir}/queue";
         };
 
+        systemd.paths.agent-guidance = {
+          description = "Watch for workers' ask-cockpit questions";
+          wantedBy = [ "multi-user.target" ];
+          pathConfig.PathExistsGlob = "/var/lib/agents/work/*/task/question-*.md";
+        };
+
         systemd.services = {
           # The path-triggered starter: kick every worker's drainer (no-op
           # for drainers already running) and exit, so the path unit can
@@ -146,6 +158,62 @@
             script = "systemctl start --no-block ${
               concatMapStringsSep " " (w: "agent-dispatch-${w.name}.service") cfg.workers
             }";
+          };
+          # GUIDANCE — answers workers' ask-cockpit questions with a stronger
+          # model, using the cockpit user's own claude login (which is why it
+          # runs as primaryUser, whose uid 1000 also matches the guest agent
+          # through virtiofs, so the answer file is writable). Question text
+          # comes from inside a guest, i.e. is UNTRUSTED input: the answering
+          # claude gets no tools at all — it can only read the passed prompt
+          # and produce text. Always answers and removes the question, even
+          # on failure, so the path unit cannot retrigger in a loop.
+          agent-guidance = {
+            description = "Answer workers' ask-cockpit questions";
+            path = [
+              pkgs.claude-code
+              pkgs.coreutils
+            ];
+            serviceConfig = {
+              Type = "oneshot";
+              User = config.primaryUser;
+              Group = "users";
+              Slice = "agents.slice";
+            };
+            script = ''
+              for q in /var/lib/agents/work/*/task/question-*.md; do
+                if [ ! -e "$q" ]; then
+                  continue
+                fi
+                dir="$(dirname "$q")"
+                n="$(basename "$q" .md)"
+                n="''${n#question-}"
+                answer="$dir/answer-$n.md"
+                echo "answering $q"
+
+                guidance="$(
+                  timeout 300 claude -p \
+                    "You supervise a fleet of sandboxed coding/research agents. One of them is working on the task below and has asked you a question. Give concise, decisive guidance it can act on immediately.
+
+              == THE AGENT'S TASK ==
+              $(cat "$dir/prompt.md" 2>/dev/null || echo "(prompt unavailable)")
+
+              == THE AGENT'S QUESTION ==
+              $(cat "$q")" \
+                    --model ${cfg.guidanceModel} \
+                    --disallowedTools Bash Edit Write Read Grep Glob Task WebFetch WebSearch NotebookEdit
+                )" || guidance="(the supervising model could not be reached; proceed on your best judgment)"
+
+                {
+                  echo "## Question"
+                  cat "$q"
+                  echo
+                  echo "## Guidance"
+                  printf '%s\n' "$guidance"
+                } > "$answer.tmp"
+                mv "$answer.tmp" "$answer"
+                rm -f "$q"
+              done
+            '';
           };
         }
         // listToAttrs (map (w: nameValuePair "agent-dispatch-${w.name}" (drainerFor w.name)) cfg.workers);
