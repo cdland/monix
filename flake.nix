@@ -53,6 +53,13 @@
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
+  # microvm.nix: hypervisor-backed guests for the agent fleet (see
+  # modules/server/microvm-host.mod.nix, gated on agentFleet.enable).
+  inputs.microvm = {
+    url = "github:microvm-nix/microvm.nix";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
   outputs =
     inputs:
     inputs.flake-parts.lib.mkFlake

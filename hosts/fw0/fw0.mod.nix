@@ -41,6 +41,10 @@ in
         # tailnet SSH); any machine is just a terminal into it.
         cockpit.enable = true;
 
+        # Agent-fleet microVM host (Phase 2). Brings up the host-only bridge +
+        # egress proxy + microvm.nix runner (see microvm-host.mod.nix).
+        agentFleet.enable = true;
+
         # BOOTSTRAP LOGIN — a throwaway console password so a fresh headless
         # install is reachable: log in at the console, `sudo tailscale up` to
         # join the tailnet, then change it with `passwd`. `initialPassword`
