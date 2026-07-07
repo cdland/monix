@@ -304,8 +304,12 @@
                     { print }
                   ' "$prompt" > /tmp/prompt-body.md
 
+                  # --dangerously-skip-permissions is the point of the fleet:
+                  # the agent runs unattended with every tool auto-approved,
+                  # and the VM + egress proxy are the actual containment.
                   rc=0
                   claude -p "$(cat /tmp/prompt-body.md)" ''${model:+--model "$model"} \
+                    --dangerously-skip-permissions \
                     --append-system-prompt 'If you are stuck, need a decision above your pay grade, or want a second opinion, run `ask-cockpit "<your question>"` in the shell: it consults a stronger supervising model and prints its guidance (allow a few minutes). At most 5 questions per task.' \
                     > ${guestTaskMount}/report.md \
                     2> ${guestTaskMount}/agent.log || rc=$?
