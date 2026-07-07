@@ -48,12 +48,8 @@ in
         # FLEET CREDENTIALS — subscription logins shared by all workers,
         # as agenix secrets; create/refresh with `agenix -e
         # hosts/fw0/<name>.age` from the repo root (the agenix CLI ships on
-        # cockpit hosts). No push credential yet: when the worker should
-        # push, create a fine-grained PAT scoped to exactly its repo
-        # (Contents read/write on that repo only; a forge ruleset protects
-        # main and allows agent/** pushes), encrypt it as
-        # hosts/fw0/agent-lfish-pat.age (currently a placeholder), declare
-        # it like the secrets below, and set the worker's `patFile`.
+        # cockpit hosts). Workers hold no push credentials: results come
+        # back over the task share, so tasks need no forge access.
         secrets.agent-claude-token.file = ./agent-claude-token.age;
         secrets.agent-codex-auth.file = ./agent-codex-auth.age;
 
@@ -62,11 +58,19 @@ in
           codexAuthFile = config.secrets.agent-codex-auth.path;
         };
 
-        agentFleet.workers = singleton {
-          name = "lfish-0";
-          index = 1;
-          repo = "cdland/lfish";
-        };
+        # Generic workers: no repo binding (set `repo`, and a push
+        # credential via `patFile`, on a worker that should work a
+        # specific repository).
+        agentFleet.workers = [
+          {
+            name = "worker-0";
+            index = 1;
+          }
+          {
+            name = "worker-1";
+            index = 2;
+          }
+        ];
 
         # BOOTSTRAP LOGIN — no password is committed here (this repo is
         # public, and `max` is the wheel/sudo account). On a fresh install,

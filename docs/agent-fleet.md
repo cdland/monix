@@ -52,19 +52,21 @@ pristine.
 
 Agents authenticate with **subscription logins**, not API keys: one Claude
 Code OAuth token (`claude setup-token`) and one copy of Codex's `auth.json`
-(ChatGPT login) are shared fleet-wide, plus optionally (`patFile`) one
-**fine-grained GitHub PAT per worker class** scoped to exactly its repository
-(Contents read/write on that repo only; a forge ruleset protects `main` and
-permits `agent/**` pushes). The PAT's scope is the forge-side containment
+(ChatGPT login) are shared fleet-wide. Workers are generic by default: no
+repo binding, no push credential — tasks return results over the task
+share, so the forge is not in the loop at all. A worker meant to work one
+specific repository gets `repo` plus optionally `patFile`, a
+**fine-grained GitHub PAT scoped to exactly that repository** (Contents
+read/write on that repo only; a forge ruleset protects `main` and permits
+`agent/**` pushes). The credential's scope is the forge-side containment
 boundary — repo-specificity lives only in the roster entry and the injected
-secret, never in the modules. A worker without a PAT can run its agents and
-clone public repos but cannot push.
+secret, never in the modules.
 
 These are agenix secrets under `hosts/fw0/`, decrypted by the host key at
 activation. cloud-hypervisor does not support `microvm.credentialFiles`
 (qemu-only), so injection works via a share: per worker, a host oneshot
 (`agent-creds-<name>`) assembles a root-owned `0700` directory
-`/run/agents/creds/<name>` containing exactly that worker's three files,
+`/run/agents/creds/<name>` containing exactly that worker's files,
 which is exported to the guest as a **read-only virtiofs share** (virtiofsd
 runs as root; the `microvm` user can never read it). In the guest,
 `agent-credentials.service` installs them for the `agent` user:
@@ -75,7 +77,7 @@ runs as root; the `microvm` user can never read it). In the guest,
 - `~agent/.codex/auth.json` (`0400`) — Codex's login.
 - git pushes over HTTPS using gh as the credential helper (`GH_TOKEN` →
   credentials at run time; no token on disk in gitconfig). `AGENT_REPO`
-  holds the worker's repo URL.
+  holds the repo URL on repo-bound workers.
 
 Never place secrets in the nix store: guests read the entire host store.
 
@@ -104,17 +106,20 @@ vim /tmp/mytask.md                              # write the prompt
 mv /tmp/mytask.md /var/lib/agents/tasks/queue/  # mv, so no half-written file is seen
 ```
 
-A path unit fires when the queue becomes non-empty and the dispatcher drains
-it serially on the first roster worker: it stages `prompt.md` into the
-worker's task share (`/var/lib/agents/work/<worker>/task`, mounted at
-`/run/task` in the guest), restarts the VM — the volume wipe makes every
-task run pristine — and the guest's `agent-task` unit runs
+A path unit fires when the queue becomes non-empty and starts one drainer
+per roster worker (`agent-dispatch-<worker>`). Each drainer claims tasks
+off the queue with an atomic rename — losers of the race just re-scan — so
+tasks run concurrently up to the number of workers. Per task, the drainer
+stages `prompt.md` into its worker's task share
+(`/var/lib/agents/work/<worker>/task`, mounted at `/run/task` in the
+guest), restarts the VM — the volume wipe makes every task run pristine —
+and the guest's `agent-task` unit runs
 `claude -p "$(cat /run/task/prompt.md)"` as the agent user, writing
 `report.md`, `agent.log`, and `exit-code` back through the share. The
-dispatcher polls for the exit code, stops the VM, and files everything under
+drainer polls for the exit code, stops the VM, and files everything under
 `/var/lib/agents/tasks/done/<id>/` (nonzero exit or `agentFleet.taskTimeout`
 — default 90 min — go to `failed/` instead). Progress is in
-`journalctl -u agent-dispatcher`.
+`journalctl -u 'agent-dispatch-*'`.
 
 The dispatcher owns worker lifecycle: a manually started VM is restarted out
 from under you when a task arrives. Results land on the host disk only —
@@ -125,16 +130,19 @@ tasks need no forge access and no push credentials.
 Lifecycle is manual, from the cockpit session on fw0:
 
 ```sh
-systemctl start microvm@lfish-0     # boot (seconds)
-microvm -s lfish-0                  # serial console (root autologin —
+systemctl start microvm@worker-0    # boot (seconds)
+microvm -s worker-0                 # serial console (root autologin —
                                     # reaching the PTY already requires host root)
-ssh agent@10.100.0.11               # from the host; admin keys are authorized
-systemctl stop microvm@lfish-0
+systemctl stop microvm@worker-0
 ```
 
-Adding a worker is one `agentFleet.workers` entry in the host module plus its
-PAT secret; the VM definition, slice override, and credential directory are
-all generated from it.
+Guests run no sshd and hold no authorized keys — the task share is the only
+data channel, and the serial console (host-root-gated) the only interactive
+one.
+
+Adding a worker is one `agentFleet.workers` entry in the host module; the
+VM definition, its queue drainer, slice override, and credential directory
+are all generated from it.
 
 ## Verifying containment
 

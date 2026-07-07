@@ -1,7 +1,7 @@
 # Agent-fleet dispatcher. See docs/agent-fleet.md. Turns the fleet into a
 # drop-a-file service: a task is a markdown prompt placed in the queue
-# directory; the dispatcher runs it on a pristine worker VM and collects the
-# report — no SSH into guests, no forge in the loop.
+# directory; a worker runs it on a pristine VM and the report comes back —
+# no SSH into guests, no forge in the loop.
 #
 #   /var/lib/agents/tasks/queue/<name>.md   <- drop tasks here (wheel-writable;
 #                                              write elsewhere and `mv` in, so
@@ -9,12 +9,15 @@
 #   /var/lib/agents/tasks/done/<id>/        <- prompt.md + report.md + agent.log
 #   /var/lib/agents/tasks/failed/<id>/      <- same, for nonzero exit or timeout
 #
-# A path unit fires when the queue becomes non-empty; the dispatcher drains
-# it serially on the first roster worker: stage prompt into the worker's
-# task share, restart the VM (volume wipe makes it pristine), poll for the
-# guest's exit-code file, stop the VM, file the results. The dispatcher owns
-# worker lifecycle — a manually started VM will be restarted out from under
-# you when a task arrives.
+# Scheduling: a path unit fires when the queue becomes non-empty and starts
+# one drainer per roster worker. Each drainer claims tasks off the queue
+# with an atomic rename (losers just re-scan), so tasks run concurrently up
+# to the number of workers, and a drainer exits when the queue is empty.
+# Per task: stage the prompt into the worker's task share, restart the VM
+# (the volume wipe makes it pristine), poll for the guest's exit-code file,
+# stop the VM, file the results. The dispatcher owns worker lifecycle — a
+# manually started VM will be restarted out from under you when a task
+# arrives.
 {
   flake.nixosModules.agent-dispatch =
     {
@@ -24,14 +27,90 @@
       ...
     }:
     let
-      inherit (lib.lists) head;
+      inherit (lib.attrsets) listToAttrs nameValuePair;
       inherit (lib.modules) mkIf;
       inherit (lib.options) mkOption;
+      inherit (lib.strings) concatMapStringsSep;
       inherit (lib) types;
 
       cfg = config.agentFleet;
 
       tasksDir = "/var/lib/agents/tasks";
+
+      drainerFor =
+        worker:
+        let
+          work = "/var/lib/agents/work/${worker}/task";
+        in
+        {
+          description = "Drain the agent task queue on worker ${worker}";
+          path = [
+            pkgs.coreutils
+            pkgs.systemd
+          ];
+          serviceConfig = {
+            Type = "oneshot";
+            Slice = "agents.slice";
+          };
+          script = ''
+            queue=${tasksDir}/queue
+            running=${tasksDir}/running
+            work=${work}
+
+            reset_work() {
+              rm -rf "$work"
+              install -d -m 0755 -o 1000 -g 100 "$work"
+            }
+
+            while :; do
+              set -- "$queue"/*.md
+              if [ ! -e "$1" ]; then
+                break
+              fi
+              id="$(basename "$1" .md)-$(date +%Y%m%d-%H%M%S)"
+              # Atomic claim: with several drainers racing for the same
+              # task file, exactly one rename succeeds; losers re-scan.
+              if ! mv "$1" "$running/$id.md" 2>/dev/null; then
+                continue
+              fi
+              echo "dispatching $id to ${worker}"
+
+              reset_work
+              install -m 0444 "$running/$id.md" "$work/prompt.md"
+              systemctl restart microvm@${worker}.service
+
+              deadline=$(( $(date +%s) + ${toString cfg.taskTimeout} ))
+              status=timeout
+              while [ "$(date +%s)" -lt "$deadline" ]; do
+                if [ -f "$work/exit-code" ]; then
+                  if [ "$(cat "$work/exit-code")" = 0 ]; then
+                    status=done
+                  else
+                    status=failed
+                  fi
+                  break
+                fi
+                sleep 10
+              done
+              systemctl stop microvm@${worker}.service
+
+              if [ "$status" = done ]; then
+                out=${tasksDir}/done/$id
+              else
+                out=${tasksDir}/failed/$id
+              fi
+              install -d "$out"
+              mv "$running/$id.md" "$out/prompt.md"
+              for f in report.md agent.log exit-code; do
+                if [ -f "$work/$f" ]; then
+                  install -m 0644 "$work/$f" "$out/$f"
+                fi
+              done
+              reset_work
+              echo "$id finished: $status -> $out"
+            done
+          '';
+        };
     in
     {
       options.agentFleet.taskTimeout = mkOption {
@@ -56,76 +135,20 @@
           pathConfig.DirectoryNotEmpty = "${tasksDir}/queue";
         };
 
-        systemd.services.agent-dispatcher = {
-          description = "Dispatch queued tasks to agent workers";
-          path = [
-            pkgs.coreutils
-            pkgs.systemd
-          ];
-          serviceConfig = {
-            Type = "oneshot";
-            Slice = "agents.slice";
+        systemd.services = {
+          # The path-triggered starter: kick every worker's drainer (no-op
+          # for drainers already running) and exit, so the path unit can
+          # re-trigger for later arrivals.
+          agent-dispatcher = {
+            description = "Start a queue drainer per agent worker";
+            path = [ pkgs.systemd ];
+            serviceConfig.Type = "oneshot";
+            script = "systemctl start --no-block ${
+              concatMapStringsSep " " (w: "agent-dispatch-${w.name}.service") cfg.workers
+            }";
           };
-          script =
-            let
-              worker = (head cfg.workers).name;
-              work = "/var/lib/agents/work/${worker}/task";
-            in
-            ''
-              queue=${tasksDir}/queue
-              running=${tasksDir}/running
-              work=${work}
-
-              reset_work() {
-                rm -rf "$work"
-                install -d -m 0755 -o 1000 -g 100 "$work"
-              }
-
-              while :; do
-                set -- "$queue"/*.md
-                if [ ! -e "$1" ]; then
-                  break
-                fi
-                id="$(basename "$1" .md)-$(date +%Y%m%d-%H%M%S)"
-                echo "dispatching $id to ${worker}"
-                mv "$1" "$running/$id.md"
-
-                reset_work
-                install -m 0444 "$running/$id.md" "$work/prompt.md"
-                systemctl restart microvm@${worker}.service
-
-                deadline=$(( $(date +%s) + ${toString cfg.taskTimeout} ))
-                status=timeout
-                while [ "$(date +%s)" -lt "$deadline" ]; do
-                  if [ -f "$work/exit-code" ]; then
-                    if [ "$(cat "$work/exit-code")" = 0 ]; then
-                      status=done
-                    else
-                      status=failed
-                    fi
-                    break
-                  fi
-                  sleep 10
-                done
-                systemctl stop microvm@${worker}.service
-
-                if [ "$status" = done ]; then
-                  out=${tasksDir}/done/$id
-                else
-                  out=${tasksDir}/failed/$id
-                fi
-                install -d "$out"
-                mv "$running/$id.md" "$out/prompt.md"
-                for f in report.md agent.log exit-code; do
-                  if [ -f "$work/$f" ]; then
-                    install -m 0644 "$work/$f" "$out/$f"
-                  fi
-                done
-                reset_work
-                echo "$id finished: $status -> $out"
-              done
-            '';
-        };
+        }
+        // listToAttrs (map (w: nameValuePair "agent-dispatch-${w.name}" (drainerFor w.name)) cfg.workers);
       };
     };
 }

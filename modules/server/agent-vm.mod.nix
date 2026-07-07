@@ -21,7 +21,6 @@
 # virtiofs share of a root-owned host directory holding exactly its own
 # credentials, assembled from the agenix-decrypted files by a host oneshot.
 # Never put secrets in the nix store — guests read the ENTIRE host store.
-{ self, ... }:
 {
   flake.nixosModules.agent-guests =
     {
@@ -31,7 +30,7 @@
       ...
     }:
     let
-      inherit (lib.attrsets) listToAttrs nameValuePair;
+      inherit (lib.attrsets) listToAttrs nameValuePair optionalAttrs;
       inherit (lib.lists) concatMap singleton;
       inherit (lib.meta) getExe';
       inherit (lib.modules) mkIf;
@@ -162,9 +161,10 @@
                 HTTP_PROXY = proxyUrl;
                 HTTPS_PROXY = proxyUrl;
                 NO_PROXY = "127.0.0.1,localhost";
-                # The one repo this worker class works on and pushes to.
-                AGENT_REPO = "https://github.com/${repo}.git";
-              };
+              }
+              # The one repo this worker class works on, when it is bound to
+              # one at all.
+              // optionalAttrs (repo != null) { AGENT_REPO = "https://github.com/${repo}.git"; };
 
               environment.systemPackages = [
                 pkgs.claude-code
@@ -268,20 +268,14 @@
               };
 
               # The sole account. No wheel, no sudo; it owns /workspace and
-              # nothing else. Keyed to the admin keys: the human cockpit
-              # session is the dispatcher.
+              # nothing else. No SSH into guests at all — tasks and results
+              # move over the task share, and the only interactive way in is
+              # the serial console below.
               users.users.agent = {
                 isNormalUser = true;
                 description = "fleet worker";
-                openssh.authorizedKeys.keys = self.keys-admin;
               };
               systemd.tmpfiles.rules = singleton "d /workspace 0755 agent users -";
-
-              services.openssh = {
-                enable = true;
-                settings.PermitRootLogin = "no";
-                settings.PasswordAuthentication = false;
-              };
 
               # Root autologin on the serial console: reaching the console at
               # all requires host-root (the microvm@ unit's PTY), and guest
@@ -308,9 +302,10 @@
                 name = mkOption { type = types.str; };
                 index = mkOption { type = types.ints.between 1 99; };
                 repo = mkOption {
-                  type = types.str;
+                  type = types.nullOr types.str;
+                  default = null;
                   example = "cdland/lfish";
-                  description = "GitHub owner/repo this worker class is bound to";
+                  description = "GitHub owner/repo this worker class is bound to; null = a generic worker with no repo binding";
                 };
                 patFile = mkOption {
                   type = types.nullOr types.str;
