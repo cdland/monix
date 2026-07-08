@@ -3,11 +3,14 @@
 # directory; a worker runs it on a pristine VM and the report comes back —
 # no SSH into guests, no forge in the loop.
 #
-#   /var/lib/agents/tasks/queue/<name>.md   <- drop tasks here (wheel-writable;
-#                                              write elsewhere and `mv` in, so
-#                                              a half-written file is never seen)
+#   /var/lib/agents/tasks/queue/<name>.md   <- tasks land here, enqueued by the
+#                                              `fleet` tool run as the operator
+#                                              user (see fleet-tool.mod.nix); the
+#                                              queue is operator-owned, not
+#                                              wheel-writable
 #   /var/lib/agents/tasks/done/<id>/        <- prompt.md + report.md + agent.log
 #   /var/lib/agents/tasks/failed/<id>/      <- same, for nonzero exit or timeout
+#   /var/lib/agents/tasks/rejected/         <- quarantined non-regular queue entries
 #
 # Scheduling: a path unit fires when the queue becomes non-empty and starts
 # one drainer per roster worker. Each drainer claims tasks off the queue
@@ -34,6 +37,7 @@
       inherit (lib) types;
 
       cfg = config.agentFleet;
+      op = cfg.operatorUser;
 
       tasksDir = "/var/lib/agents/tasks";
 
@@ -55,6 +59,7 @@
           script = ''
             queue=${tasksDir}/queue
             running=${tasksDir}/running/${worker}
+            rejected=${tasksDir}/rejected
             work=${work}
 
             # ORDER MATTERS in the VM cycle: the share directory may only be
@@ -75,6 +80,24 @@
               echo "$(date '+%F %T') ${worker} $*" | tee -a ${tasksDir}/log
             }
 
+            # Pull a single front-matter value ("agent"/"model") out of a task
+            # file, for the audit log. Same block the guest parses to pick the
+            # executor (agent-vm.mod.nix); empty if absent.
+            fm() {
+              awk -v key="$1" '
+                NR==1 && $0=="---" { h=1; next }
+                h && $0=="---" { exit }
+                h && $0 ~ "^"key":" { sub("^"key":[ \t]*",""); print; exit }
+              ' "$2" 2>/dev/null
+            }
+
+            # Seconds -> "8m1s", for human-readable durations in the log.
+            dhms() { printf '%dm%ds' $(( $1 / 60 )) $(( $1 % 60 )); }
+
+            # Collapse a front-matter value to one safe token so a task file
+            # can't inject extra space-separated fields into a lifecycle line.
+            san() { printf '%s' "$1" | tr -cd 'A-Za-z0-9._-' | cut -c1-40; }
+
             # Recover tasks stranded by a previous drainer instance that died
             # mid-task (host switch, failure): requeue them.
             install -d "$running"
@@ -87,22 +110,56 @@
 
             while :; do
               set -- "$queue"/*.md
-              if [ ! -e "$1" ]; then
+              # A dangling symlink makes -e false; -L still catches it, so a
+              # planted symlink can't masquerade as "queue empty" and strand
+              # the real tasks behind it.
+              if [ ! -e "$1" ] && [ ! -L "$1" ]; then
                 break
               fi
-              id="$(basename "$1" .md)-$(date +%Y%m%d-%H%M%S)"
+              # File results under the submitted id verbatim (the fleet tool
+              # already guarantees a unique id, so `fleet watch/fetch <id>`
+              # resolves by exact match). Only disambiguate a name that would
+              # actually collide — e.g. a hand-dropped file reusing an id from
+              # an earlier run.
+              id="$(basename "$1" .md)"
+              if [ -e "${tasksDir}/done/$id" ] || [ -e "${tasksDir}/failed/$id" ] || [ -e "$running/$id.md" ]; then
+                id="$id-$(date +%Y%m%d-%H%M%S)-$RANDOM"
+              fi
               # Atomic claim: with several drainers racing for the same
               # task file, exactly one rename succeeds; losers re-scan.
               if ! mv "$1" "$running/$id.md" 2>/dev/null; then
                 continue
               fi
-              log "dispatch $id"
+
+              # Defense in depth: only ever process a PLAIN regular file. mv
+              # moves a symlink verbatim (it does not dereference), so a
+              # symlinked queue entry would otherwise be dereferenced as ROOT
+              # by the install below — turning "dispatch a task" into a
+              # root-privileged read of the link target (agenix secrets, host
+              # keys, other workers' creds). The queue is operator-owned and
+              # the fleet tool only ever writes plain files, so this should
+              # never fire; if it does, quarantine and move on.
+              if [ -L "$running/$id.md" ] || [ ! -f "$running/$id.md" ]; then
+                install -d "$rejected"
+                mv "$running/$id.md" "$rejected/$id.md" 2>/dev/null || rm -f "$running/$id.md"
+                log "rejected $id (non-regular queue entry)"
+                continue
+              fi
+              start="$(date +%s)"
+              seen_q=" "
 
               stop_vm
               reset_work
               install -m 0444 "$running/$id.md" "$work/prompt.md"
+              # Read the metadata from the installed, root-owned 0444 copy —
+              # the exact bytes the worker will run — not the claimed file,
+              # so the logged agent/model can't drift from what's dispatched.
+              agent="$(san "$(fm agent "$work/prompt.md")")"
+              agent="''${agent:-claude}"
+              model="$(san "$(fm model "$work/prompt.md")")"
+              log "DISPATCH $id agent=$agent''${model:+ model=$model}"
               if ! systemctl start microvm@${worker}.service; then
-                log "failed-to-start $id"
+                log "FAILED $id (worker would not start)"
                 stop_vm
                 out=${tasksDir}/failed/$id
                 install -d "$out"
@@ -127,6 +184,25 @@
                 set -- "$work"/question-*.md
                 if [ -e "$1" ]; then
                   systemctl start --no-block agent-guidance.service
+                  # Log each distinct escalation once, as the agent raises it.
+                  for qf in "$work"/question-*.md; do
+                    [ -e "$qf" ] || continue
+                    qn="$(basename "$qf" .md)"
+                    qn="''${qn#question-}"
+                    # ask-cockpit numbers questions; ignore anything else (a
+                    # compromised guest could plant question-*.md with glob
+                    # metacharacters that would corrupt the seen-set match).
+                    case "$qn" in
+                      "" | *[!0-9]*) continue ;;
+                    esac
+                    case "$seen_q" in
+                      *" $qn "*) : ;;
+                      *)
+                        log "ESCALATE $id question $qn -> ${cfg.guidanceModel}"
+                        seen_q="$seen_q$qn "
+                        ;;
+                    esac
+                  done
                 fi
                 sleep 10
               done
@@ -145,7 +221,20 @@
                 fi
               done
               reset_work
-              log "$status $id"
+
+              # Narrative completion line: how long it ran, how many times it
+              # escalated to the guidance model, and whether a report came back.
+              esc=0
+              for a in "$out"/answer-*.md; do
+                [ -f "$a" ] && esc=$(( esc + 1 ))
+              done
+              dur="$(dhms $(( $(date +%s) - start )))"
+              if [ -f "$out/report.md" ]; then
+                report="report $(wc -c <"$out/report.md") bytes"
+              else
+                report="no report"
+              fi
+              log "$(echo "$status" | tr '[:lower:]' '[:upper:]') $id ran $dur, $esc escalation(s), $report"
             done
           '';
         };
@@ -166,14 +255,25 @@
       config = mkIf (cfg.enable && cfg.workers != [ ]) {
         systemd.tmpfiles.rules = [
           "d ${tasksDir} 0755 root root -"
-          # The cockpit user (wheel) drops tasks and reads results.
-          "d ${tasksDir}/queue 0770 root wheel -"
+          # The queue is owned by the unprivileged dispatch operator, NOT
+          # wheel: the cockpit enqueues only by running the `fleet` tool as
+          # that operator (see fleet-tool.mod.nix). root (the drainer) still
+          # has full access regardless of group.
+          "d ${tasksDir}/queue 0770 root ${op} -"
           "d ${tasksDir}/running 0755 root root -" # per-worker subdirs, created by drainers
           "d ${tasksDir}/done 0755 root root -"
           "d ${tasksDir}/failed 0755 root root -"
-          # One line per dispatch/completion — the fleet ticker
-          # (`tail -f` it from the cockpit).
-          "f ${tasksDir}/log 0644 root root -"
+          "d ${tasksDir}/rejected 0755 root root -" # quarantined non-regular queue entries
+          # The audit trail — one line per lifecycle event (SUBMIT / DISPATCH
+          # / ESCALATE / DONE / FAILED / NOTE). Group-owned by the operator so
+          # the `fleet` tool can append SUBMIT/NOTE lines; the root drainer
+          # writes the rest. World-readable so `tail -f` from the cockpit
+          # works. NOTE: this is an operational record, not tamper-evident
+          # evidence — the operator group can rewrite it. Values interpolated
+          # into lines are sanitised (see `san`) so a task file can't forge
+          # fields, but hardening against a compromised operator rewriting the
+          # whole file would require a root-only append helper (a later step).
+          "f ${tasksDir}/log 0664 root ${op} -"
         ];
 
         systemd.paths.agent-dispatcher = {

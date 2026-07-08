@@ -99,12 +99,32 @@ static (no ballooning), default 8 vCPU / 8 GiB. Guest state lives on the
 
 ## Dispatch
 
-A task is a markdown prompt. From the cockpit:
+A task is a markdown prompt, enqueued with the `fleet` tool. The cockpit never
+writes the queue directly: the queue is owned by an unprivileged operator user
+(`agentFleet.operatorUser`, default `fleet-operator`), and the cockpit reaches
+it only by running `fleet` as that operator through a sudo rule scoped to
+exactly that one binary (see fleet-tool.mod.nix). This sudo hop — not any
+Claude permission rule — is the security boundary: a compromised or
+prompt-injected cockpit can enqueue tasks and read reports, and nothing else.
 
 ```sh
-vim /tmp/mytask.md                              # write the prompt
-mv /tmp/mytask.md /var/lib/agents/tasks/queue/  # mv, so no half-written file is seen
+run() { sudo -n -u fleet-operator fleet "$@"; }
+
+id=$(run submit myslug < mytask.md)   # prompt on STDIN; prints the task id
+run watch  "$id"                      # block until done/failed
+run fetch  "$id"                      # print report.md (untrusted-output banner)
+run status                            # tail the audit log
+run note "$id" both models agreed     # annotate the audit trail (see below)
+# or the whole loop in one blocking call:
+run run myslug < mytask.md            # submit + watch + fetch -> the report
 ```
+
+`submit` takes the prompt on stdin, never a path: the `< mytask.md` redirect is
+opened by the *caller's* shell with the caller's privileges, so the tool never
+opens a caller-supplied path and the root drainer never dereferences a
+caller-supplied symlink. As further defense in depth the drainer rejects any
+symlink or non-regular queue entry (quarantining it under `tasks/rejected/`)
+before it would otherwise `install` it as root.
 
 An optional front-matter block sets task options (unknown keys are ignored):
 
@@ -148,10 +168,34 @@ and the guest's `agent-task` unit runs
 `report.md`, `agent.log`, and `exit-code` back through the share. The
 drainer polls for the exit code, stops the VM, and files everything under
 `/var/lib/agents/tasks/done/<id>/` (nonzero exit or `agentFleet.taskTimeout`
-— default 90 min — go to `failed/` instead). One line per dispatch and
-completion lands in `/var/lib/agents/tasks/log` — `tail -f` it from the
-cockpit as the fleet ticker; fuller detail is in
+— default 90 min — go to `failed/` instead). The task lifecycle is recorded
+as a narrative audit trail in `/var/lib/agents/tasks/log` — `tail -f` it from
+the cockpit as the fleet ticker:
+
+```
+2026-07-08 13:20:00 cockpit SUBMIT   fix-lint-20260708-132000-4210842 agent=codex model=gpt-5.5 by=max
+2026-07-08 13:20:04 worker-0 DISPATCH fix-lint-20260708-132000-4210842 agent=codex model=gpt-5.5
+2026-07-08 13:24:31 worker-0 ESCALATE fix-lint-20260708-132000-4210842 question 1 -> opus
+2026-07-08 13:26:10 cockpit NOTE     fix-lint-20260708-132000-4210842 both models agreed on the fix (by max)
+2026-07-08 13:28:12 worker-0 DONE     fix-lint-20260708-132000-4210842 ran 8m8s, 1 escalation(s), report 24043 bytes
+```
+
+(The tool gives each task a unique id at submit, and the drainer files results
+under that id verbatim, so one id threads the whole lifecycle.)
+
+i.e. who dispatched what (and as which agent/model), when it started on which
+worker, each ask-cockpit escalation as it happens (and to which model), and how
+long it ran / how many escalations / whether a report came back. The SUBMIT
+line is written by the `fleet` tool (the log is group-owned by the operator so
+it can append); the rest by the root drainer. Fuller detail is in
 `journalctl -u 'agent-dispatch-*'`.
+
+The cockpit can interleave its own free-text annotations with `fleet note [id]
+<text>` — tagged `NOTE` and attributed, so they read as commentary
+(`cockpit NOTE fix-lint-… both models agreed on the retry-with-backoff fix
+(by max)`) and are never mistaken for a machine-emitted lifecycle fact.
+Newlines are flattened so a note is always exactly one line and cannot forge
+extra entries.
 
 The dispatcher owns worker lifecycle: a manually started VM is restarted out
 from under you when a task arrives. Results land on the host disk only —

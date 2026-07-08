@@ -460,6 +460,13 @@
                 # The drainer owns worker lifecycle; upstream's Restart=always
                 # (VMs as long-running services) would fight its stop/start.
                 Restart = mkForce "no";
+                # Don't wait on a graceful guest poweroff — the guest is
+                # ephemeral (volumes are wiped on next start), so a clean
+                # shutdown buys nothing and the guest's own poweroff is slow.
+                # Bound the stop so systemd SIGKILLs the VMM almost at once,
+                # reclaiming ~45s/task. (Default was 90s; the guest was taking
+                # the better part of a minute to power off cleanly.)
+                TimeoutStopSec = mkForce 3;
                 # EPHEMERALITY — delete the volume images before every start;
                 # the runner's autoCreate recreates them blank (truncate +
                 # mkfs), so each boot is a clean slate.
