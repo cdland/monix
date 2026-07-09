@@ -119,66 +119,89 @@
             done
 
             while :; do
-              set -- "$queue"/*.md
-              # A dangling symlink makes -e false; -L still catches it, so a
-              # planted symlink can't masquerade as "queue empty" and strand
-              # the real tasks behind it.
-              if [ ! -e "$1" ] && [ ! -L "$1" ]; then
-                # Queue empty: as a resident daemon, wait and re-scan rather than
-                # exit. Short poll — a ~2s dispatch delay is invisible next to
-                # the guest's boot time.
-                sleep 2
-                continue
-              fi
-              # File results under the submitted id verbatim (the fleet tool
-              # already guarantees a unique id, so `fleet watch/fetch <id>`
-              # resolves by exact match). Only disambiguate a name that would
-              # actually collide — e.g. a hand-dropped file reusing an id from
-              # an earlier run.
-              id="$(basename "$1" .md)"
-              if [ -e "${tasksDir}/done/$id" ] || [ -e "${tasksDir}/failed/$id" ] || [ -e "$running/$id.md" ]; then
-                id="$id-$(date +%Y%m%d-%H%M%S)-$RANDOM"
-              fi
-              # Atomic claim: with several drainers racing for the same
-              # task file, exactly one rename succeeds; losers re-scan.
-              if ! mv "$1" "$running/$id.md" 2>/dev/null; then
+              # Warm pool: bring up a FRESH idle VM first (empty share; the guest
+              # boots and blocks in its wait loop until a task is delivered), THEN
+              # wait for work. One task per VM — it is destroyed and reborn after
+              # each task, so isolation is identical to booting per-task; only the
+              # boot moves off the task's critical path.
+              stop_vm
+              reset_work
+              if ! systemctl start microvm@${worker}.service; then
+                log "warm boot failed (worker would not start), retrying"
+                stop_vm
+                sleep 5
                 continue
               fi
 
-              # Defense in depth: only ever process a PLAIN regular file. mv
-              # moves a symlink verbatim (it does not dereference), so a
-              # symlinked queue entry would otherwise be dereferenced as ROOT
-              # by the install below — turning "dispatch a task" into a
-              # root-privileged read of the link target (agenix secrets, host
-              # keys, other workers' creds). The queue is operator-owned and
-              # the fleet tool only ever writes plain files, so this should
-              # never fire; if it does, quarantine and move on.
-              if [ -L "$running/$id.md" ] || [ ! -f "$running/$id.md" ]; then
-                install -d "$rejected"
-                mv "$running/$id.md" "$rejected/$id.md" 2>/dev/null || rm -f "$running/$id.md"
-                log "rejected $id (non-regular queue entry)"
-                continue
-              fi
+              # Wait for a task WITHOUT rebooting the warm VM (inner loop).
+              id=""
+              while :; do
+                set -- "$queue"/*.md
+                # A dangling symlink makes -e false; -L still catches it, so a
+                # planted symlink can't masquerade as "queue empty" and strand
+                # the real tasks behind it.
+                if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+                  # Queue empty: poll and re-scan. Stay in THIS loop so the warm
+                  # VM is not rebooted; ~2s is invisible next to boot time.
+                  sleep 2
+                  continue
+                fi
+                # File results under the submitted id verbatim (the fleet tool
+                # already guarantees a unique id, so `fleet watch/fetch <id>`
+                # resolves by exact match). Only disambiguate a name that would
+                # actually collide — e.g. a hand-dropped file reusing an id from
+                # an earlier run.
+                id="$(basename "$1" .md)"
+                if [ -e "${tasksDir}/done/$id" ] || [ -e "${tasksDir}/failed/$id" ] || [ -e "$running/$id.md" ]; then
+                  id="$id-$(date +%Y%m%d-%H%M%S)-$RANDOM"
+                fi
+                # Atomic claim: with several drainers racing for the same
+                # task file, exactly one rename succeeds; losers re-scan.
+                if ! mv "$1" "$running/$id.md" 2>/dev/null; then
+                  id=""
+                  continue
+                fi
+
+                # Defense in depth: only ever process a PLAIN regular file. mv
+                # moves a symlink verbatim (it does not dereference), so a
+                # symlinked queue entry would otherwise be dereferenced as ROOT
+                # by the install below — turning "dispatch a task" into a
+                # root-privileged read of the link target (agenix secrets, host
+                # keys, other workers' creds). The queue is operator-owned and
+                # the fleet tool only ever writes plain files, so this should
+                # never fire; if it does, quarantine and move on.
+                if [ -L "$running/$id.md" ] || [ ! -f "$running/$id.md" ]; then
+                  install -d "$rejected"
+                  mv "$running/$id.md" "$rejected/$id.md" 2>/dev/null || rm -f "$running/$id.md"
+                  log "rejected $id (non-regular queue entry)"
+                  id=""
+                  continue
+                fi
+                break
+              done
               start="$(date +%s)"
               seen_q=" "
 
-              stop_vm
-              reset_work
-              install -m 0444 "$running/$id.md" "$work/prompt.md"
+              # The warm VM could have died while we waited. Delivering into a
+              # dead VM would hang the task until the full taskTimeout, so if it
+              # is gone, requeue the task and cycle a fresh warm boot instead.
+              if ! systemctl is-active --quiet microvm@${worker}.service; then
+                log "warm VM died before dispatch, requeueing $id"
+                mv -f "$running/$id.md" "$queue/$id.md" 2>/dev/null || true
+                continue
+              fi
+
+              # Deliver the task into the ALREADY-RUNNING VM's share. Write to a
+              # temp name and atomically rename so the guest's wait loop never
+              # observes a half-written prompt.md.
+              install -m 0444 "$running/$id.md" "$work/.prompt.md.tmp"
+              mv -f "$work/.prompt.md.tmp" "$work/prompt.md"
               # Read the metadata from the installed, root-owned 0444 copy —
               # the exact bytes the worker will run — not the claimed file,
               # so the logged agent/model can't drift from what's dispatched.
               agent="$(san "$(fm agent "$work/prompt.md")")"
               model="$(san "$(fm model "$work/prompt.md")")"
               log "DISPATCH $id agent=$agent''${model:+ model=$model}"
-              if ! systemctl start microvm@${worker}.service; then
-                log "FAILED $id (worker would not start)"
-                stop_vm
-                out=${tasksDir}/failed/$id
-                install -d "$out"
-                mv "$running/$id.md" "$out/prompt.md"
-                continue
-              fi
 
               deadline=$(( $(date +%s) + ${toString cfg.taskTimeout} ))
               status=timeout

@@ -273,7 +273,10 @@
                 requires = [ "agent-credentials.service" ];
                 after = [ "agent-credentials.service" ];
                 unitConfig = {
-                  ConditionPathExists = "${guestTaskMount}/prompt.md";
+                  # No ConditionPathExists on prompt.md: the guest boots idle and
+                  # the wait loop in the script blocks until the host delivers a
+                  # task, so gating the unit on the file existing would skip it
+                  # entirely on a warm (empty-share) boot.
                   RequiresMountsFor = [ guestTaskMount ];
                 };
                 # The full system path, not a minimal tool list: the agent's
@@ -310,6 +313,13 @@
                 script = ''
                   . /run/agent-env
                   prompt=${guestTaskMount}/prompt.md
+
+                  # Warm pool: boot idle and wait for the host to deliver a task
+                  # into the share, then run exactly ONE task. The host destroys
+                  # this VM after reading exit-code, so a second prompt is never
+                  # seen in the same boot. (Backward-compatible: a prompt already
+                  # present at boot makes this pass immediately.)
+                  while [ ! -f "$prompt" ]; do sleep 1; done
 
                   fm() {
                     awk -v key="$1" '
