@@ -203,15 +203,43 @@
               model="$(san "$(fm model "$work/prompt.md")")"
               log "DISPATCH $id agent=$agent''${model:+ model=$model}"
 
-              deadline=$(( $(date +%s) + ${toString cfg.taskTimeout} ))
+              # Heartbeat wait: finish on exit-code; otherwise kill only if the
+              # task STALLS (no agent.log growth for stallTimeout) or exceeds the
+              # absolute cap (taskTimeout). A task that keeps producing output
+              # keeps resetting the stall clock, so long legit work runs as long
+              # as it needs (up to the cap) instead of dying at a fixed wall,
+              # while a genuinely stuck task dies in ~stallTimeout rather than
+              # holding a warm worker for the whole cap.
+              hard_deadline=$(( $(date +%s) + ${toString cfg.taskTimeout} ))
+              last_progress=$(date +%s)
+              last_hb=0
               status=timeout
-              while [ "$(date +%s)" -lt "$deadline" ]; do
+              while :; do
+                now=$(date +%s)
                 if [ -f "$work/exit-code" ]; then
                   if [ "$(cat "$work/exit-code")" = 0 ]; then
                     status=done
                   else
                     status=failed
                   fi
+                  break
+                fi
+                # Liveness signal: the guest's .heartbeat file, touched every ~15s
+                # by agent-task while it runs — independent of whether the agent is
+                # producing output, so a long thinking block or silent build still
+                # counts as alive. No heartbeat for stallTimeout => the VM/agent is
+                # genuinely dead, not merely quiet.
+                hb=$(stat -c %Y "$work/.heartbeat" 2>/dev/null || echo 0)
+                if [ "$hb" != "$last_hb" ]; then
+                  last_hb=$hb
+                  last_progress=$now
+                fi
+                if [ $(( now - last_progress )) -ge ${toString cfg.stallTimeout} ]; then
+                  log "STALLED $id (no heartbeat for ${toString cfg.stallTimeout}s)"
+                  break
+                fi
+                if [ "$now" -ge "$hard_deadline" ]; then
+                  log "CAP $id (hit absolute ${toString cfg.taskTimeout}s cap)"
                   break
                 fi
                 # An ask-cockpit question is pending: kick the answerer.
@@ -276,10 +304,20 @@
         };
     in
     {
+      # Two-part timeout (see the poll loop): a task is killed when it STALLS
+      # (no agent.log output for stallTimeout) OR blows the absolute cap
+      # (taskTimeout), whichever comes first.
+      options.agentFleet.stallTimeout = mkOption {
+        type = types.int;
+        default = 120; # 2 min — the guest heartbeats every ~15s while alive, so a
+        # 2-min gap means the VM/agent is genuinely dead, not merely quiet.
+        description = "seconds with no guest heartbeat before a task is treated as stalled/dead and killed";
+      };
+
       options.agentFleet.taskTimeout = mkOption {
         type = types.int;
-        default = 5400;
-        description = "seconds a task may run before the worker is stopped and the task filed as failed";
+        default = 21600; # 6h absolute cap / runaway backstop
+        description = "absolute max seconds a task may run before the worker is stopped and the task filed as failed, regardless of progress";
       };
 
       options.agentFleet.guidanceModel = mkOption {

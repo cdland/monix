@@ -353,6 +353,15 @@
 
                   hint="$(cat ${hintFile})"
 
+                  # Heartbeat: touch a file every 15s while the task runs so the
+                  # host can tell "alive and working" — even through a long thinking
+                  # block or a silent build, which produce no agent.log output —
+                  # from "the VM/agent died". (claude streams its response to
+                  # report.md, not agent.log, so agent.log growth is NOT a reliable
+                  # liveness signal.) Killed once the executor returns.
+                  ( while :; do touch ${guestTaskMount}/.heartbeat; sleep 15; done ) &
+                  hbpid=$!
+
                   rc=0
                   if [ -z "$agent" ] || [ -z "$model" ]; then
                     echo "task rejected: agent and model must both be specified" | tee ${guestTaskMount}/report.md > ${guestTaskMount}/agent.log
@@ -386,6 +395,7 @@
                         ;;
                     esac
                   fi
+                  kill "$hbpid" 2>/dev/null || true
                   echo "$rc" > ${guestTaskMount}/exit-code
                 '';
               };
