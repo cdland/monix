@@ -10,6 +10,25 @@
 # `isDesktop || cockpit.enable`.
 { inputs, ... }:
 {
+  flake.homeModules.cockpit =
+    { lib, osConfig, ... }:
+    let
+      guide = import ../lib/fleet-guide.nix;
+      inherit (lib.modules) mkIf;
+    in
+    {
+      config = mkIf osConfig.cockpit.enable {
+        home.file."cockpit/AGENTS.md" = {
+          force = true;
+          text = guide.system + guide.pilot;
+        };
+        home.file."cockpit/CLAUDE.md" = {
+          force = true;
+          text = "@AGENTS.md\n";
+        };
+      };
+    };
+
   flake.nixosModules.cockpit =
     {
       config,

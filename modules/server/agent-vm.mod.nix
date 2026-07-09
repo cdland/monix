@@ -38,6 +38,9 @@
       inherit (lib.strings) concatMapStringsSep fixedWidthString optionalString;
       inherit (lib) types;
 
+      guide = import ../../lib/fleet-guide.nix;
+      hintFile = pkgs.writeText "worker-hint.md" (guide.system + guide.worker);
+
       cfg = config.agentFleet;
 
       hostAddr = "10.100.0.1";
@@ -326,7 +329,7 @@
                     { print }
                   ' "$prompt" > /tmp/prompt-body.md
 
-                  hint='If you are stuck, need a decision above your pay grade, or want a second opinion, run `ask-cockpit "<your question>"` in the shell: it consults a stronger supervising model and prints its guidance (allow a few minutes). At most 5 questions per task.'
+                  hint="$(cat ${hintFile})"
 
                   rc=0
                   case "$agent" in
