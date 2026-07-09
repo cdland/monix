@@ -50,6 +50,7 @@
           description = "Drain the agent task queue on worker ${worker}";
           path = [
             pkgs.coreutils
+            pkgs.gawk
             pkgs.systemd
           ];
           serviceConfig = {
@@ -155,7 +156,6 @@
               # the exact bytes the worker will run — not the claimed file,
               # so the logged agent/model can't drift from what's dispatched.
               agent="$(san "$(fm agent "$work/prompt.md")")"
-              agent="''${agent:-claude}"
               model="$(san "$(fm model "$work/prompt.md")")"
               log "DISPATCH $id agent=$agent''${model:+ model=$model}"
               if ! systemctl start microvm@${worker}.service; then

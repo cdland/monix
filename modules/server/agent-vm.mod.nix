@@ -300,8 +300,8 @@
                 # The prompt may start with a front-matter block setting task
                 # options; unknown keys are ignored. Currently understood:
                 #   ---
-                #   agent: claude        <- executor: claude (default) | codex
-                #   model: sonnet        <- passed to the executor's --model
+                #   agent: claude        <- required executor: claude | codex
+                #   model: sonnet        <- required executor --model value
                 #   ---
                 # New executors are one more case branch below; the contract
                 # is only: read prompt body, write report.md + agent.log +
@@ -332,33 +332,38 @@
                   hint="$(cat ${hintFile})"
 
                   rc=0
-                  case "$agent" in
-                    "" | claude)
-                      claude -p "$(cat /tmp/prompt-body.md)" ''${model:+--model "$model"} \
-                        --dangerously-skip-permissions \
-                        --append-system-prompt "$hint" \
-                        > ${guestTaskMount}/report.md \
-                        2> ${guestTaskMount}/agent.log || rc=$?
-                      ;;
-                    codex)
-                      # No system-prompt flag; the hint rides atop the prompt.
-                      # stdout is the session transcript (-> agent.log); the
-                      # final message is the report.
-                      codex exec \
-                        --dangerously-bypass-approvals-and-sandbox \
-                        --skip-git-repo-check \
-                        ''${model:+--model "$model"} \
-                        --output-last-message ${guestTaskMount}/report.md \
-                        "$hint
+                  if [ -z "$agent" ] || [ -z "$model" ]; then
+                    echo "task rejected: agent and model must both be specified" | tee ${guestTaskMount}/report.md > ${guestTaskMount}/agent.log
+                    rc=64
+                  else
+                    case "$agent" in
+                      claude)
+                        claude -p "$(cat /tmp/prompt-body.md)" --model "$model" \
+                          --dangerously-skip-permissions \
+                          --append-system-prompt "$hint" \
+                          > ${guestTaskMount}/report.md \
+                          2> ${guestTaskMount}/agent.log || rc=$?
+                        ;;
+                      codex)
+                        # No system-prompt flag; the hint rides atop the prompt.
+                        # stdout is the session transcript (-> agent.log); the
+                        # final message is the report.
+                        codex exec \
+                          --dangerously-bypass-approvals-and-sandbox \
+                          --skip-git-repo-check \
+                          --model "$model" \
+                          --output-last-message ${guestTaskMount}/report.md \
+                          "$hint
 
-                      $(cat /tmp/prompt-body.md)" \
-                        > ${guestTaskMount}/agent.log 2>&1 < /dev/null || rc=$?
-                      ;;
-                    *)
-                      echo "unknown agent '$agent' (known: claude, codex)" | tee ${guestTaskMount}/report.md > ${guestTaskMount}/agent.log
-                      rc=64
-                      ;;
-                  esac
+                        $(cat /tmp/prompt-body.md)" \
+                          > ${guestTaskMount}/agent.log 2>&1 < /dev/null || rc=$?
+                        ;;
+                      *)
+                        echo "unknown agent '$agent' (known: claude, codex)" | tee ${guestTaskMount}/report.md > ${guestTaskMount}/agent.log
+                        rc=64
+                        ;;
+                    esac
+                  fi
                   echo "$rc" > ${guestTaskMount}/exit-code
                 '';
               };

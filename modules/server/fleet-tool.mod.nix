@@ -102,6 +102,12 @@
             [ -s "$stage" ] || die "empty prompt on stdin"
             [ "$(wc -c <"$stage")" -le 1048576 ] || die "prompt too large (>1MiB)"
 
+            local agent model
+            agent="$(san "$(fm agent "$stage")")"
+            [ -n "$agent" ] || die "agent not specified in front-matter (agent: claude|codex)"
+            model="$(san "$(fm model "$stage")")"
+            [ -n "$model" ] || die "model not specified in front-matter (model: <model-id>)"
+
             # Atomic, collision-proof publish. staging and queue share a
             # filesystem, so a hardlink is atomic and — unlike `mv -n`, which
             # can silently no-op on an existing target — FAILS loudly if the
@@ -120,13 +126,9 @@
             rm -f "$stage"
             trap - EXIT
 
-            local agent model
-            agent="$(san "$(fm agent "$queue/$base.md")")"
-            agent="''${agent:-claude}"
-            model="$(san "$(fm model "$queue/$base.md")")"
             printf '%s cockpit SUBMIT %s agent=%s%s by=%s\n' \
               "$(date '+%F %T')" "$base" "$agent" \
-              "''${model:+ model=$model}" "''${SUDO_USER:-?}" \
+              " model=$model" "''${SUDO_USER:-?}" \
               >>"$log" 2>/dev/null || true
             printf '%s\n' "$base"
           }
