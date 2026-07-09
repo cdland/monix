@@ -153,6 +153,18 @@
     in
     {
       config = mkIf osConfig.isDesktop {
+        # DMS monitor-settings controls (Settings → Displays): DMS writes the
+        # monitor layout it manages to ~/.config/hypr/dms/outputs.lua at
+        # runtime, and the Hyprland config must require it. The file has to be
+        # a real, user-writable file — NOT a home.file store symlink — so it's
+        # seeded empty by a tmpfiles rule (`f` never touches an existing
+        # file). Monitor config is thereby deliberately imperative (GUI-owned
+        # runtime state, like DMS's theme files); colors/layout stay declared
+        # here, so their DMS counterparts are not wired in.
+        systemd.user.tmpfiles.rules = [
+          "f %h/.config/hypr/dms/outputs.lua 0644 - - -"
+        ];
+
         wayland.windowManager.hyprland = {
           enable = true;
           configType = "lua";
@@ -187,6 +199,15 @@
           # (which silently skips undefined vars, so this is safe even if
           # one of them isn't set).
           systemd.enable = false;
+
+          # DMS-owned monitor config (see the tmpfiles rule above). pcall, not
+          # a bare require: if the seed file is ever missing (first login
+          # racing tmpfiles), a bare require would abort the whole Lua config
+          # and take the session down with it — degrade to default monitor
+          # layout instead.
+          extraConfig = ''
+            pcall(require, "dms.outputs")
+          '';
 
           settings = {
             env = [
