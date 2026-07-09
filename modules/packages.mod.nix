@@ -121,6 +121,7 @@
           pkgs.keepassxc
           pkgs.libreoffice
           pkgs.obsidian
+          pkgs.signal-desktop
         ];
       };
     };
