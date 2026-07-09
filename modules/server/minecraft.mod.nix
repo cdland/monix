@@ -146,6 +146,15 @@
         services.minecraft-servers = {
           enable = true;
 
+          # systemd-socket management instead of the default tmux: the server
+          # runs in the FOREGROUND, so its console output (and any crash)
+          # lands in the journal instead of being swallowed by a detached
+          # tmux session — a Java-21-vs-25 launch failure was invisible for
+          # exactly that reason. Console commands go via the socket:
+          # `echo save-all > /run/minecraft-server/main.stdin`.
+          managementSystem.tmux.enable = false;
+          managementSystem.systemd-socket.enable = true;
+
           # EULA. Accepting Mojang's EULA is a precondition of running a server;
           # stated explicitly here rather than hidden.
           eula = true;
