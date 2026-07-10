@@ -26,6 +26,27 @@
           force = true;
           text = "@AGENTS.md\n";
         };
+
+        # /launch — deterministic trigger for the "launch the ship" pre-flight
+        # described in fleet-guide.nix (the spoken phrase works for any model
+        # via AGENTS.md; this makes it a one-keystroke ritual in Claude Code).
+        home.file."cockpit/.claude/commands/launch.md" = {
+          force = true;
+          text = ''
+            ---
+            description: Pre-flight — orient in the cockpit and report ship status
+            ---
+
+            Run the pre-flight ("launch the ship") from AGENTS.md:
+
+            1. Read `~/.claude/projects/-home-max-cockpit/memory/MEMORY.md` and open every
+               memory relevant to active or open work.
+            2. Run `sudo -n -u fleet-operator fleet status` (standalone, never chained).
+            3. Report in a few lines: ship status, drone-fleet health, the open backlog
+               and loose ends, and anything time-sensitive. Then hold for a heading from
+               the captain — don't start work unprompted.
+          '';
+        };
       };
     };
 
