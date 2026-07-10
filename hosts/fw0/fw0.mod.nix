@@ -51,6 +51,18 @@ in
         # pivot onto localhost, the LAN, or the fleet bridge.
         minecraft.enable = true;
 
+        # Local inference: llama.cpp (Vulkan) behind llama-swap on :8091,
+        # tailnet-only, models load on demand and unload after idle
+        # (inference.mod.nix). The catalog starts EMPTY — to serve a model,
+        # download a GGUF into /var/lib/models and declare it, e.g.:
+        #   inference.models."qwen3-30b-a3b" = {
+        #     file = "Qwen3-30B-A3B-Q4_K_M.gguf";
+        #     flags = [ "-c" "32768" ];
+        #   };
+        # NB models ~60G+ also need the GTT kernel params, i.e. one reboot
+        # after the first switch of this aspect.
+        inference.enable = true;
+
         # FLEET CREDENTIALS — subscription logins shared by all workers,
         # as agenix secrets; create/refresh with `agenix -e
         # hosts/fw0/<name>.age` from the repo root (the agenix CLI ships on
