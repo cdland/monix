@@ -61,6 +61,14 @@
        loose ends, and anything time-sensitive. Then hold for a heading from the
        captain — don't start work unprompted.
 
+    ## Ship status
+
+    When the captain says **ship status** in any AI chat, run `ship-status` and
+    return its complete dashboard verbatim in a fenced text block. Do not replace
+    it with an improvised summary. The command is also available directly in a
+    terminal and shows host resources, service health, active agent tasks, the
+    warm VM pool, and Minecraft players.
+
     ## Your role as engineer
 
     Plan with the captain, dispatch work to the drones, monitor it, and review/summarize
@@ -118,7 +126,7 @@
 
         ---
         agent: claude | codex | opencode # required
-        model: <model-id>     # required; e.g. gpt-5.5 for codex. For opencode this is a
+        model: <model-id>     # required; e.g. gpt-5.6-sol for codex. For opencode this is a
                               # provider/model slug, one of:
                               #   openrouter/<vendor>/<model> — ANY model on the OpenRouter
                               #     catalog (e.g. openrouter/moonshotai/kimi-k2), metered;
@@ -129,14 +137,14 @@
                               # `none` or omitted => no advisor. Cross-provider guidance
                               # is not implemented; do not put Codex/OpenCode ids here.
         effort: <level>       # optional; only for models with a thinking level. claude:
-                              # low|medium|high|xhigh|max ; codex: minimal|low|medium|high;
+                              # low|medium|high|xhigh|max ; codex: none|low|medium|high|xhigh;
                               # opencode: passed as a model variant (e.g. high, max, minimal
                               # — provider-specific, only for models that have variants).
                               # Omit for models without one.
         ---
 
     Each external executor and the credentialless local-model path run as separate non-root
-    Unix users; they share only the disposable workspace. Use `codex` + `gpt-5.5` for independent reviews / second opinions (bills the ChatGPT pool,
+    Unix users; they share only the disposable workspace. Use `codex` + `gpt-5.6-sol` for independent reviews / second opinions (bills the ChatGPT pool,
     not the Claude pool). Use `opencode` + an openrouter/ slug for anything outside the two
     subscription vendors — NB unlike those pools it bills OpenRouter credit per token, so
     match model price to task weight. Use `opencode` + a local/ id for bulk low-stakes work:

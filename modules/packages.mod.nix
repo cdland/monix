@@ -4,7 +4,16 @@
 #
 # System-scoped bundles are universal: available to root and every user on
 # both host classes. Home bundles gate themselves on isDesktop.
+{ inputs, ... }:
 {
+  flake.nixosModules.packages-codex-latest = { pkgs, ... }: {
+    nixpkgs.overlays = [
+      (_final: _prev: {
+        codex = inputs.nixpkgs-master.legacyPackages.${pkgs.stdenv.hostPlatform.system}.codex;
+      })
+    ];
+  };
+
   flake.nixosModules.packages-editors =
     { pkgs, ... }:
     {

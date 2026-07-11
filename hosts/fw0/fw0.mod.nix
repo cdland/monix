@@ -121,7 +121,7 @@ in
         # guests are cheap (cloud-hypervisor demand-pages RAM; an idle guest
         # holds only a few hundred MB), and the fleet's real usage is capped
         # fleet-wide by the agents.slice budget. Pool size is just this number.
-        agentFleet.workers = builtins.genList (i: {
+        agentFleet.workers = lib.lists.genList (i: {
           name = "worker-${toString i}";
           index = i + 1;
         }) 10;

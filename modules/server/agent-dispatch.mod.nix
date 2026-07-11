@@ -28,6 +28,7 @@
       inherit (lib.attrsets) listToAttrs nameValuePair;
       inherit (lib.modules) mkIf;
       inherit (lib.options) mkOption;
+      inherit (lib.strings) optionalString;
       inherit (lib) types;
 
       cfg = config.agentFleet;
@@ -55,7 +56,9 @@
           source, destination, max_bytes, mode = sys.argv[1:]
           max_bytes = int(max_bytes)
           mode = int(mode, 8)
-          source_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+          source_fd = os.open(
+              source, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW
+          )
           destination_fd = None
           try:
               metadata = os.fstat(source_fd)
@@ -101,6 +104,7 @@
         worker:
         let
           work = "/var/lib/agents/work/${worker}/task";
+          creds = "/run/agents/creds/${worker}";
         in
         {
           description = "Drain the agent task queue on worker ${worker}";
@@ -117,6 +121,7 @@
           startLimitIntervalSec = 0;
           path = [
             pkgs.coreutils
+            pkgs.findutils
             pkgs.gawk
             pkgs.systemd
           ];
@@ -131,6 +136,7 @@
             rejected=${tasksDir}/rejected
             guidance_root=${tasksDir}/guidance/${worker}
             work=${work}
+            creds=${creds}
 
             # ORDER MATTERS in the VM cycle: the share directory may only be
             # recreated while the VM (and its virtiofsd) is stopped — pulling
@@ -144,6 +150,39 @@
             reset_work() {
               rm -rf "$work"
               install -d -m 0770 -o root -g users "$work"
+            }
+
+            reset_creds() {
+              find "$creds" -mindepth 1 -maxdepth 1 -delete
+              chmod 0700 "$creds"
+              chown root:root "$creds"
+            }
+
+            stage_credential() {
+              local source= destination=
+              reset_creds
+              case "$agent:$model" in
+                claude:*) source=${cfg.credentials.claudeTokenFile}; destination=claude-token ;;
+                codex:*) source=${cfg.credentials.codexAuthFile}; destination=codex-auth.json ;;
+                opencode:openrouter/*)
+                  ${optionalString (cfg.credentials.openrouterKeyFile != null) ''
+                    source=${cfg.credentials.openrouterKeyFile}; destination=openrouter-key
+                  ''}
+                  ;;
+                opencode:local/*) return 0 ;;
+                *) return 1 ;;
+              esac
+              [ -n "$source" ] || return 0
+              install -m 0400 -o root -g root "$source" "$creds/.credential.tmp"
+              mv "$creds/.credential.tmp" "$creds/$destination"
+            }
+
+            stage_metadata() {
+              printf 'agent=%q\nmodel=%q\neffort=%q\n' "$agent" "$model" "$effort" \
+                > "$creds/.task-meta.tmp"
+              chmod 0400 "$creds/.task-meta.tmp"
+              chown root:root "$creds/.task-meta.tmp"
+              mv "$creds/.task-meta.tmp" "$creds/task-meta"
             }
 
             log() {
@@ -193,6 +232,7 @@
               # boot moves off the task's critical path.
               stop_vm
               reset_work
+              reset_creds
               if ! systemctl start microvm@${worker}.service; then
                 log "warm boot failed (worker would not start), retrying"
                 stop_vm
@@ -211,6 +251,10 @@
                   # Queue empty: poll and re-scan. Stay in THIS loop so the warm
                   # VM is not rebooted; ~2s is invisible next to boot time.
                   sleep 2
+                  if ! systemctl is-active --quiet microvm@${worker}.service; then
+                    log "warm VM died while idle, recycling"
+                    continue 2
+                  fi
                   continue
                 fi
                 # File results under the submitted id verbatim (the fleet tool
@@ -278,22 +322,26 @@
                 mv -f "$running/$id.md" "$queue/$id.md" 2>/dev/null || true
                 continue
               fi
+              # Parse the root-owned claimed copy. The guest receives identical
+              # bytes but can replace entries in its writable share.
+              agent="$(san "$(fm agent "$running/$id.md")")"
+              model="$(san "$(fm model "$running/$id.md")")"
+              effort="$(san "$(fm effort "$running/$id.md")")"
+              guidance="$(san "$(fm guidance "$running/$id.md")")"
+              if ! stage_credential; then
+                log "rejected $id (unsupported executor credential selection)"
+              fi
+              stage_metadata
               install -d -m 0770 -o root -g users "$guidance_task"
 
-              # Deliver the task into the ALREADY-RUNNING VM's share. Write to a
-              # temp name and atomically rename so the guest's wait loop never
-              # observes a half-written prompt.md.
-              install -m 0444 "$running/$id.md" "$work/.prompt.md.tmp"
-              mv -f "$work/.prompt.md.tmp" "$work/prompt.md"
+              # Stage context and the one selected credential first. Publish
+              # prompt.md LAST so the waiting guest cannot begin with a partial
+              # task environment.
               if [ -n "$context_running" ]; then
                 ${safeTransfer} "$context_running" "$work/context.tar.zst" ${toString cfg.taskContextMaxBytes} 0444
               fi
-              # Read the metadata from the installed, root-owned 0444 copy —
-              # the exact bytes the worker will run — not the claimed file,
-              # so the logged agent/model can't drift from what's dispatched.
-              agent="$(san "$(fm agent "$work/prompt.md")")"
-              model="$(san "$(fm model "$work/prompt.md")")"
-              guidance="$(san "$(fm guidance "$work/prompt.md")")"
+              install -m 0444 "$running/$id.md" "$work/.prompt.md.tmp"
+              mv -f "$work/.prompt.md.tmp" "$work/prompt.md"
               log "DISPATCH $id agent=$agent''${model:+ model=$model}''${guidance:+ guidance=$guidance}"
 
               # Heartbeat wait: finish on exit-code; otherwise kill only if the
@@ -412,6 +460,7 @@
                 sleep 10
               done
               stop_vm
+              reset_creds
 
               if [ "$status" = done ]; then
                 out=${tasksDir}/done/$id
@@ -534,9 +583,8 @@
         ];
 
         systemd.services = {
-          # Repair historical archive permissions as well as the parent dirs.
-          # find does not follow symlinks by default; unsafe legacy entries are
-          # therefore never dereferenced during this migration.
+          # One-time migration for archives created before private result modes
+          # were enforced at creation. New archives are already correct.
           agent-results-permissions = {
             description = "Restrict agent result archives to fleet readers";
             wantedBy = [ "multi-user.target" ];
@@ -545,6 +593,7 @@
               pkgs.coreutils
               pkgs.findutils
             ];
+            unitConfig.ConditionPathExists = "!${tasksDir}/.permissions-v1";
             serviceConfig.Type = "oneshot";
             script = ''
               for dir in ${tasksDir}/done ${tasksDir}/failed ${tasksDir}/rejected; do
@@ -554,6 +603,7 @@
                 find "$dir" -mindepth 1 -type d -exec chown root:${readers} {} + -exec chmod 0750 {} +
                 find "$dir" -type f -exec chown root:${readers} {} + -exec chmod 0640 {} +
               done
+              touch ${tasksDir}/.permissions-v1
             '';
           };
 

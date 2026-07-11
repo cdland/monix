@@ -49,6 +49,7 @@
         name = "fleet";
         runtimeInputs = [
           pkgs.coreutils
+          pkgs.findutils
           pkgs.gnugrep
           pkgs.gnutar
           pkgs.gawk
@@ -226,6 +227,8 @@
             local slug="$1" prompt="$2" context_dir="$3" temp
             [ -f "$prompt" ] && [ ! -L "$prompt" ] || die "prompt must be a regular file"
             [ -d "$context_dir" ] && [ ! -L "$context_dir" ] || die "context must be a directory"
+            [ -z "$(find "$context_dir" -xdev ! -type f ! -type d ! -type l -print -quit)" ] \
+              || die "context contains a special file (only regular files, directories, and symlinks are allowed)"
             temp="$(mktemp -d)"
             trap 'rm -rf "$temp"' EXIT
             install -m 0600 "$prompt" "$temp/prompt.md"
@@ -236,6 +239,8 @@
               --exclude='./result' \
               --exclude='./.env' \
               --exclude='./.env.local' \
+              --exclude='*/.env' \
+              --exclude='*/.env.local' \
               .
             [ "$(wc -c < "$temp/context.tar.zst")" -le ${toString cfg.taskContextMaxBytes} ] \
               || die "context exceeds ${toString cfg.taskContextMaxBytes} bytes compressed"
@@ -317,6 +322,21 @@
 
           cmd_status() { tail -n "''${1:-20}" "$log" 2>/dev/null || true; }
 
+          cmd_active() {
+            local prompt worker id agent model started age now
+            now="$(date +%s)"
+            for prompt in "$tasks"/running/*/*.md; do
+              [ -f "$prompt" ] || continue
+              worker="$(basename "$(dirname "$prompt")")"
+              id="$(basename "$prompt" .md)"
+              agent="$(san "$(fm agent "$prompt")")"
+              model="$(san "$(fm model "$prompt")")"
+              started="$(stat -c %Y "$prompt")"
+              age=$((now - started))
+              printf '%s\t%s\t%s\t%s\t%s\n' "$worker" "$id" "$agent" "$model" "$age"
+            done
+          }
+
           cmd_health() {
             local queued=0 running_count=0 done_count=0 failed_count=0
             local warm=0 drainers=0 failed_units disk_use memory
@@ -374,10 +394,125 @@
             patch) cmd_patch "$@" ;;
             run) cmd_run "$@" ;;
             status) cmd_status "$@" ;;
+            active) cmd_active ;;
             health) cmd_health "$@" ;;
             note) cmd_note "$@" ;;
-            *) die "usage: fleet {dispatch <slug> <prompt.md> <context-dir>|submit [slug] <prompt.md|watch <id>|fetch <id>|logs <id>|patch <id>|run [slug] <prompt.md|status [n]|health|note [id] <text>}" ;;
+            *) die "usage: fleet {dispatch <slug> <prompt.md> <context-dir>|submit [slug] <prompt.md|watch <id>|fetch <id>|logs <id>|patch <id>|run [slug] <prompt.md|status [n]|active|health|note [id] <text>}" ;;
           esac
+        '';
+      };
+
+      shipStatus = pkgs.writeShellApplication {
+        name = "ship-status";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.gawk
+          pkgs.gnugrep
+          pkgs.mcstatus
+          pkgs.procps
+          pkgs.systemd
+          pkgs.tailscale
+          pkgs.util-linux
+        ];
+        text = ''
+          if [ -t 1 ] && [ -z "''${NO_COLOR:-}" ]; then
+            bold=$'\e[1m'; dim=$'\e[2m'; cyan=$'\e[36m'; green=$'\e[32m'
+            yellow=$'\e[33m'; red=$'\e[31m'; reset=$'\e[0m'
+          else
+            bold=; dim=; cyan=; green=; yellow=; red=; reset=
+          fi
+
+          bytes() {
+            if [ "''${1:-}" = "[not set]" ] || [ -z "''${1:-}" ]; then printf 'n/a';
+            else numfmt --to=iec --suffix=B "$1" 2>/dev/null || printf 'n/a'; fi
+          }
+          state() {
+            local value
+            value="$(systemctl is-active "$1" 2>/dev/null || true)"
+            case "$value" in
+              active) printf '%s● active%s' "$green" "$reset" ;;
+              activating) printf '%s◐ starting%s' "$yellow" "$reset" ;;
+              *) printf '%s● %s%s' "$red" "''${value:-missing}" "$reset" ;;
+            esac
+          }
+          duration() {
+            local total="''${1:-0}" d h m s
+            d=$((total / 86400)); h=$(((total % 86400) / 3600))
+            m=$(((total % 3600) / 60)); s=$((total % 60))
+            if [ "$d" -gt 0 ]; then printf '%dd %02dh' "$d" "$h"
+            elif [ "$h" -gt 0 ]; then printf '%dh %02dm' "$h" "$m"
+            elif [ "$m" -gt 0 ]; then printf '%dm %02ds' "$m" "$s"
+            else printf '%ds' "$s"; fi
+          }
+
+          read -r _ up _ < /proc/uptime; up="''${up%.*}"
+          read -r load1 load5 load15 _ < /proc/loadavg
+          mem_total="$(awk '/^MemTotal:/ {print $2 * 1024}' /proc/meminfo)"
+          mem_avail="$(awk '/^MemAvailable:/ {print $2 * 1024}' /proc/meminfo)"
+          mem_used=$((mem_total - mem_avail))
+          root_disk="$(df -hP / | awk 'NR==2 {print $3 " / " $2 "  (" $5 ")"}')"
+          generation="$(readlink -f /run/current-system)"; generation="''${generation#/nix/store/}"
+          failed_units="$(systemctl --failed --no-legend --no-pager | wc -l)"
+
+          printf '%s╭─ FW0 // SHIP STATUS ─────────────────────────────────────────────────────╮%s\n' "$cyan$bold" "$reset"
+          printf '│ %sHOST%s  %-16s kernel %-12s up %-9s load %s %s %s\n' \
+            "$bold" "$reset" "$(hostname)" "$(uname -r)" "$(duration "$up")" "$load1" "$load5" "$load15"
+          cpu="$(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)"
+          printf '│       silicon %s · %s threads\n' "$cpu" "$(nproc)"
+          printf '│       memory %-19s root %-22s failed units %s\n' \
+            "$(bytes "$mem_used") / $(bytes "$mem_total")" "$root_disk" "$failed_units"
+          printf '│       %sgeneration%s %s\n' "$dim" "$reset" "$generation"
+
+          printf '%s├─ RESOURCE DOMAINS ──────────────────────────────────────────────────────┤%s\n' "$cyan" "$reset"
+          for slice in cockpit.slice agents.slice inference.slice services.slice; do
+            current="$(systemctl show "$slice" -p MemoryCurrent --value 2>/dev/null || true)"
+            peak="$(systemctl show "$slice" -p MemoryPeak --value 2>/dev/null || true)"
+            printf '│ %-18s current %9s   peak %9s\n' "$slice" "$(bytes "$current")" "$(bytes "$peak")"
+          done
+
+          printf '%s├─ SERVICES ──────────────────────────────────────────────────────────────┤%s\n' "$cyan" "$reset"
+          printf '│ cockpit %-14s tunnel %-14s inference %-14s\n' \
+            "$(state opencode-web.service)" "$(state opencode-web-tunnel.service)" "$(state llama-swap.service)"
+          printf '│ nginx   %-14s squid  %-14s tailscale %-14s\n' \
+            "$(state nginx.service)" "$(state squid.service)" "$(state tailscaled.service)"
+
+          printf '%s├─ AGENT FLEET ───────────────────────────────────────────────────────────┤%s\n' "$cyan" "$reset"
+          active_file="$(mktemp)"; trap 'rm -f "$active_file"' EXIT
+          # The dashboard user intentionally owns this temporary output file.
+          # shellcheck disable=SC2024
+          /run/wrappers/bin/sudo -n -u ${op} ${fleetPath} active > "$active_file" 2>/dev/null || true
+          warm=0; starting=0; failed=0
+          ${lib.strings.concatMapStringsSep "\n" (w: ''
+            worker_state="$(systemctl is-active microvm@${w.name}.service 2>/dev/null || true)"
+            task="$(awk -F '\t' '$1=="${w.name}" {print $2 "\t" $3 "\t" $4 "\t" $5; exit}' "$active_file")"
+            case "$worker_state" in
+              active) warm=$((warm + 1)); marker="$green●$reset" ;;
+              activating) starting=$((starting + 1)); marker="$yellow◐$reset" ;;
+              *) failed=$((failed + 1)); marker="$red●$reset" ;;
+            esac
+            if [ -n "$task" ]; then
+              IFS=$'\t' read -r task_id task_agent task_model task_age <<< "$task"
+              printf '│ %s %-9s %-7s %-24s %8s  %s\n' "$marker" "${w.name}" "$task_agent" "$task_model" "$(duration "$task_age")" "$task_id"
+            elif [ "$worker_state" = active ]; then
+              printf '│ %s %-9s %sidle%s\n' "$marker" "${w.name}" "$dim" "$reset"
+            else
+              printf '│ %s %-9s %s\n' "$marker" "${w.name}" "$worker_state"
+            fi
+          '') cfg.workers}
+          printf '│ pool %s%d/%d warm%s  %s%d starting%s  %s%d failed%s\n' \
+            "$bold" "$warm" "${toString (lib.lists.length cfg.workers)}" "$reset" \
+            "$yellow" "$starting" "$reset" "$red" "$failed" "$reset"
+
+          printf '%s├─ MINECRAFT ─────────────────────────────────────────────────────────────┤%s\n' "$cyan" "$reset"
+          tail_ip="$(tailscale ip -4 2>/dev/null | awk 'NR==1 {print; exit}')"; mc=""
+          if [ -n "$tail_ip" ]; then mc="$(mcstatus "$tail_ip:25565" status 2>/dev/null || true)"; fi
+          players="$(printf '%s\n' "$mc" | awk -F': ' '$1=="players" {print $2}')"
+          version="$(printf '%s\n' "$mc" | awk -F': ' '$1=="version" {sub(/ \(protocol.*$/, "", $2); print $2}')"
+          ping="$(printf '%s\n' "$mc" | awk -F': ' '$1=="ping" {print $2}')"
+          mc_mem="$(systemctl show minecraft-server-main.service -p MemoryCurrent --value 2>/dev/null || true)"
+          printf '│ server %-14s players %-7s version %-14s ping %-10s memory %s\n' \
+            "$(state minecraft-server-main.service)" "''${players:-n/a}" "''${version:-n/a}" "''${ping:-n/a}" "$(bytes "$mc_mem")"
+          printf '%s╰──────────────────────────────────────────────────────────────────────────╯%s\n' "$cyan$bold" "$reset"
         '';
       };
     in
@@ -405,7 +540,7 @@
         };
         users.users.${config.primaryUser}.extraGroups = [ readers ];
 
-        environment.systemPackages = [ fleet ];
+        environment.systemPackages = [ fleet shipStatus ];
 
         # The ONLY path from the cockpit account into the queue: run the fleet
         # tool as the operator. Scoped to this one binary, NOPASSWD so the

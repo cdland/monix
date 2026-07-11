@@ -40,7 +40,7 @@
 
             Capability is a floor, not a dial: pick the cheapest model that clears the task's bar WITH MARGIN. Never trade capability for cost — a failed cheap attempt costs the redo plus review plus latency, which is worse than paying up front. When unsure which side of the bar a task is on, go up a tier. If a model fails a task, escalate — never retry at the same tier. Delegate freely where output is cheap to verify (builds, tests, reviewable diffs); keep work where verification costs as much as doing it.
 
-            Targets, by capability: haiku (mechanical, fully-specified), sonnet (routine implementation from a clear spec), GPT-5.5 via Codex (substantial standalone coding, independent reviews, second opinions — bills to the ChatGPT pool, much better cost/performance than Fable; always request it explicitly, e.g. `codex exec -m gpt-5.5`, and never edit `~/.codex/`), opus (strong-model work that must run inside the Claude agent loop with session context). Judgment over rules throughout.
+            Targets, by capability: haiku (mechanical, fully-specified), sonnet (routine implementation from a clear spec), GPT-5.6 Sol via Codex (substantial standalone coding, independent reviews, second opinions — bills to the ChatGPT pool, much better cost/performance than Fable; always request it explicitly, e.g. `codex exec -m gpt-5.6-sol`, and never edit `~/.codex/`), opus (strong-model work that must run inside the Claude agent loop with session context). Judgment over rules throughout.
           '';
         };
       };

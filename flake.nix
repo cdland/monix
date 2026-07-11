@@ -5,6 +5,12 @@
     url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
+  # Codex releases move faster than nixos-unstable. Consume only that package
+  # from master; the system and every other package remain on nixos-unstable.
+  inputs.nixpkgs-master = {
+    url = "github:NixOS/nixpkgs/master";
+  };
+
   inputs.nixos-hardware = {
     url = "github:NixOS/nixos-hardware/master";
   };

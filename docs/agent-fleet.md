@@ -60,9 +60,13 @@ than an idle reservation.
 
 ## Credentials
 
-The host decrypts fleet credentials with agenix and assembles a root-only
-directory for each worker. A read-only virtiofs share exposes it only to guest
-root. `agent-credentials` then installs each credential into a different
+The host decrypts fleet credentials with agenix, but idle workers receive none.
+After atomically claiming a task, the root drainer parses the executor from its
+root-owned prompt, clears that worker's root-only credential directory, and
+stages exactly one credential. It stages context next and publishes `prompt.md`
+last, so the waiting guest cannot begin with a partial task environment. A
+read-only, uncached virtiofs share exposes the selected credential to guest root,
+which validates the exact filename before installing it into the selected
 non-root executor identity:
 
 - `agent-claude`: private Claude OAuth environment under `/run/agent-claude`.
@@ -75,6 +79,17 @@ and full group access to the same disposable `/workspace`. The fixed root task
 launcher maps the validated executor name to exactly one user and runs every
 model-controlled tool under that UID. Cross-provider credential reads and
 same-UID process inspection are therefore structurally blocked.
+
+Guest root can read the selected task credential, but no other provider
+credential is present. Local-model tasks receive an empty credential share. The
+host stops the VM before clearing the share, and every new dispatch copies
+directly from the current agenix path, so credential rotation takes effect on
+the next task without a long-lived assembled copy.
+
+The same read-only share carries a host-generated `task-meta` file containing
+the canonical validated executor, model, and effort. The guest consumes this
+metadata directly instead of independently reparsing front matter; the submitter
+and root drainer retain separate validation at their trust boundaries.
 
 The selected executor can still read its own credential because its subscription
 CLI requires it. Generic workers have no attacker-controlled network destination
@@ -180,6 +195,9 @@ writes the live guest share. The drainer safely transfers the answer back.
 Completed prompts, reports, logs, patches, and answers are mode `0640` under directories
 mode `0750`, readable only by root and `agent-fleet-readers` (`max` and
 `fleet-operator`).
+
+A stamped one-time migration repairs archives created before these modes were
+enforced. Normal boots do not recursively rescan historical results.
 
 ## Audit trail
 

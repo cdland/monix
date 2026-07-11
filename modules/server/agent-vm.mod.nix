@@ -13,13 +13,12 @@
 # survives a restart — a compromised or wedged worker is one
 # `systemctl restart microvm@<name>` from pristine.
 #
-# CREDENTIALS: each executor has a distinct non-root Unix user and private
-# credential home. A Claude task can access its Claude token but cannot read
-# Codex/OpenRouter credentials (and vice versa). cloud-hypervisor does not support
-# microvm.credentialFiles (qemu-only), so each worker gets a read-only
-# virtiofs share of a root-owned host directory holding exactly its own
-# credentials, assembled from the agenix-decrypted files by a host oneshot.
-# Never put secrets in the nix store — guests read the ENTIRE host store.
+# CREDENTIALS: idle guests have an empty read-only credential share. After a
+# task is claimed, the host drainer stages exactly the selected executor's
+# credential and publishes prompt.md last. The guest validates and installs
+# that one credential into the executor's private home; local tasks receive
+# none. The VM is stopped before the host clears the share. Never put secrets
+# in the nix store — guests read the ENTIRE host store.
 {
   flake.nixosModules.agent-guests =
     {
@@ -220,15 +219,16 @@
                     source = "/nix/store";
                     mountPoint = "/nix/.ro-store";
                   }
-                  # This worker's credentials, assembled on the host by
-                  # agent-creds-<name>.service (below) and installed in-guest
-                  # by agent-credentials.service.
+                   # Empty while idle; the host drainer atomically stages only
+                   # the credential selected by the claimed task before it
+                   # publishes prompt.md.
                   {
                     proto = "virtiofs";
                     tag = "creds";
                     source = credsDir name;
                     mountPoint = guestCredsMount;
                     readOnly = true;
+                    cache = "never";
                   }
                   # Task in, report out (see agent-task below).
                   {
@@ -301,39 +301,6 @@
               # Substituters stay at the default cache.nixos.org — the only
               # cache on the egress allowlist (.nixos.org).
 
-              # CREDENTIAL INSTALL — one private credential home per executor.
-              # No model-controlled user can traverse another executor's dir.
-              systemd.services.agent-credentials = {
-                description = "Install worker credentials from the host share";
-                wantedBy = [ "multi-user.target" ];
-                before = [ "multi-user.target" ];
-                unitConfig.RequiresMountsFor = [ guestCredsMount ];
-                serviceConfig = {
-                  Type = "oneshot";
-                  RemainAfterExit = true;
-                };
-                script = ''
-                  umask 077
-                  install -d -m 0700 -o agent-claude -g users /run/agent-claude
-                  printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' \
-                    "$(cat ${guestCredsMount}/claude-token)" > /run/agent-claude/env
-                  chown agent-claude:users /run/agent-claude/env
-                  chmod 0400 /run/agent-claude/env
-
-                  install -d -m 0700 -o agent-codex -g users /home/agent-codex/.codex
-                  install -m 0400 -o agent-codex -g users \
-                    ${guestCredsMount}/codex-auth.json /home/agent-codex/.codex/auth.json
-
-                  if [ -r ${guestCredsMount}/openrouter-key ]; then
-                    install -d -m 0700 -o agent-opencode -g users /run/agent-opencode
-                    printf 'export OPENROUTER_API_KEY=%q\n' \
-                      "$(cat ${guestCredsMount}/openrouter-key)" > /run/agent-opencode/env
-                    chown agent-opencode:users /run/agent-opencode/env
-                    chmod 0400 /run/agent-opencode/env
-                  fi
-                '';
-              };
-
               # TASK RUNNER — if the dispatcher staged a prompt in the task
               # share before boot, run it headless as the agent user and
               # write the results back. One task per VM lifetime: the volumes
@@ -350,14 +317,12 @@
               systemd.services.agent-task = {
                 description = "Run the dispatched task";
                 wantedBy = [ "multi-user.target" ];
-                requires = [ "agent-credentials.service" ];
-                after = [ "agent-credentials.service" ];
                 unitConfig = {
                   # No ConditionPathExists on prompt.md: the guest boots idle and
                   # the wait loop in the script blocks until the host delivers a
                   # task, so gating the unit on the file existing would skip it
                   # entirely on a warm (empty-share) boot.
-                  RequiresMountsFor = [ guestTaskMount ];
+                  RequiresMountsFor = [ guestTaskMount guestCredsMount ];
                 };
                 # The full system path, not a minimal tool list: the agent's
                 # shell inherits this unit's PATH, and it needs everything
@@ -411,18 +376,16 @@
                     sleep 1
                   done
 
-                  fm() {
-                    awk -v key="$1" '
-                      NR==1 && $0=="---" { h=1; next }
-                      h && $0=="---" { exit }
-                      h && substr($0, 1, length(key)+1) == key ":" {
-                        sub(/^[[:alnum:]_-]+:[[:space:]]*/, ""); print; exit
-                      }
-                    ' "$prompt"
-                  }
-                  agent="$(fm agent)"
-                  model="$(fm model)"
-                  effort="$(fm effort)" # optional — only for models with a thinking level
+                  credential_error=
+                  if [ -L ${guestCredsMount}/task-meta ] || [ ! -f ${guestCredsMount}/task-meta ]; then
+                    credential_error=1
+                    agent=; model=; effort=
+                  else
+                    # Host-generated canonical metadata lives in the read-only
+                    # credential share; the guest never reparses executor fields.
+                    # shellcheck disable=SC1091
+                    . ${guestCredsMount}/task-meta
+                  fi
                   awk '
                     NR==1 && $0=="---" { h=1; next }
                     h && $0=="---" { h=0; next }
@@ -467,6 +430,61 @@
                       ;;
                   esac
 
+                  # The host publishes prompt.md only after staging the selected
+                  # credential. Reject any missing, extra, linked, or wrong file
+                  # before copying it into an executor-private location.
+                  credential_count=0
+                  credential_name=
+                  for credential in ${guestCredsMount}/*; do
+                    [ -e "$credential" ] || [ -L "$credential" ] || continue
+                    if [ "$(basename "$credential")" = task-meta ]; then
+                      continue
+                    fi
+                    credential_count=$((credential_count + 1))
+                    credential_name="$(basename "$credential")"
+                    if [ -L "$credential" ] || [ ! -f "$credential" ]; then
+                      credential_error=1
+                    fi
+                  done
+                  case "$agent:$model" in
+                    claude:*) expected_credential=claude-token ;;
+                    codex:*) expected_credential=codex-auth.json ;;
+                    opencode:openrouter/*) expected_credential=openrouter-key ;;
+                    opencode:local/*) expected_credential= ;;
+                    *) expected_credential=invalid ;;
+                  esac
+                  if [ -n "$expected_credential" ]; then
+                    if [ "$credential_count" -ne 1 ] || [ "$credential_name" != "$expected_credential" ]; then
+                      credential_error=1
+                    fi
+                  elif [ "$credential_count" -ne 0 ]; then
+                    credential_error=1
+                  fi
+                  if [ -z "$credential_error" ]; then
+                    umask 077
+                    case "$expected_credential" in
+                      claude-token)
+                        install -d -m 0700 -o agent-claude -g users /run/agent-claude
+                        printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' \
+                          "$(cat ${guestCredsMount}/claude-token)" > /run/agent-claude/env
+                        chown agent-claude:users /run/agent-claude/env
+                        chmod 0400 /run/agent-claude/env
+                        ;;
+                      codex-auth.json)
+                        install -d -m 0700 -o agent-codex -g users /home/agent-codex/.codex
+                        install -m 0400 -o agent-codex -g users \
+                          ${guestCredsMount}/codex-auth.json /home/agent-codex/.codex/auth.json
+                        ;;
+                      openrouter-key)
+                        install -d -m 0700 -o agent-opencode -g users /run/agent-opencode
+                        printf 'export OPENROUTER_API_KEY=%q\n' \
+                          "$(cat ${guestCredsMount}/openrouter-key)" > /run/agent-opencode/env
+                        chown agent-opencode:users /run/agent-opencode/env
+                        chmod 0400 /run/agent-opencode/env
+                        ;;
+                    esac
+                  fi
+
                   # Heartbeat covers context preparation as well as model work,
                   # so a failed/slow capsule never looks like a dead VM.
                   ( while :; do touch ${guestTaskMount}/.heartbeat; sleep 15; done ) &
@@ -495,14 +513,17 @@
                     baseline="$(runuser -u "$task_user" -- env HOME="$task_home" \
                       git -C /workspace rev-parse HEAD)" || return
                   }
-                  if [ -n "$task_user" ] && [ -f ${guestTaskMount}/context.tar.zst ]; then
+                  if [ -z "$credential_error" ] && [ -n "$task_user" ] && [ -f ${guestTaskMount}/context.tar.zst ]; then
                     prepare_context > /tmp/context-preparation.log 2>&1 || context_error=1
                   fi
 
                   hint="$(cat ${hintFile})"
 
                   rc=0
-                  if [ -n "$context_error" ]; then
+                  if [ -n "$credential_error" ]; then
+                    echo "task rejected: credential set does not match selected executor" | tee ${guestTaskMount}/report.md > ${guestTaskMount}/agent.log
+                    rc=66
+                  elif [ -n "$context_error" ]; then
                     {
                       echo "task failed: context capsule could not be prepared"
                       cat /tmp/context-preparation.log
@@ -602,18 +623,22 @@
               users.users = {
                 agent-claude = {
                   isNormalUser = true;
+                  homeMode = "0700";
                   description = "Claude fleet executor";
                 };
                 agent-codex = {
                   isNormalUser = true;
+                  homeMode = "0700";
                   description = "Codex fleet executor";
                 };
                 agent-opencode = {
                   isNormalUser = true;
+                  homeMode = "0700";
                   description = "opencode fleet executor";
                 };
                 agent-local = {
                   isNormalUser = true;
+                  homeMode = "0700";
                   description = "credentialless local-model fleet executor";
                 };
               };
@@ -630,10 +655,8 @@
         };
     in
     {
-      # The fleet roster. Everything derived from a worker (the VM definition,
-      # its credentials, AND its slice fence) is generated from this one list,
-      # so a worker can never exist outside the agents.slice memory budget or
-      # with credentials broader than its own class's.
+      # The fleet roster. Everything derived from a worker (the VM definition
+      # and its slice fence) is generated from this one list.
       options.agentFleet = {
         workers = mkOption {
             description = "agent-fleet worker roster";
@@ -656,8 +679,8 @@
           );
         };
 
-        # Subscription credentials shared by every worker (one Claude Max +
-        # one ChatGPT login for the whole fleet).
+        # Fleet subscription credentials. The host drainer reads these paths at
+        # dispatch time and stages only the credential selected by that task.
         credentials = {
           claudeTokenFile = mkOption {
             type = types.str;
@@ -689,12 +712,16 @@
 
         microvm.vms = listToAttrs (map (w: nameValuePair w.name (mkAgentGuest w)) cfg.workers);
 
-        # Task-share sources must exist before virtiofsd starts, VM-managed
-        # or not. Writable by the guest agent (uid 1000, see workDir above).
-        systemd.tmpfiles.rules = map (w: "d ${workDir w.name} 0770 root users -") cfg.workers;
+        # Share sources must exist before virtiofsd starts. The task exchange is
+        # guest-writable; the credential source remains root-only and is empty
+        # until the drainer stages one credential for a claimed task.
+        systemd.tmpfiles.rules = concatMap (w: [
+          "d ${workDir w.name} 0770 root users -"
+          "d ${credsDir w.name} 0700 root root -"
+        ]) cfg.workers;
 
         systemd.services = listToAttrs (
-          concatMap (w: [
+          map (w:
             # microvm.nix has no slice option; standard unit override so every
             # worker counts against the fleet's 48G/agents.slice fence.
             (nameValuePair "microvm@${w.name}" {
@@ -719,30 +746,7 @@
                 );
               };
             })
-
-            # Assemble this worker's credential directory (0700 root) from
-            # the agenix-decrypted host secrets. virtiofsd runs as root, so
-            # the guest can be served files the microvm user cannot read.
-            (nameValuePair "agent-creds-${w.name}" {
-              description = "Assemble credentials for agent worker ${w.name}";
-              requiredBy = [ "microvm-virtiofsd@${w.name}.service" ];
-              before = [ "microvm-virtiofsd@${w.name}.service" ];
-              serviceConfig = {
-                Type = "oneshot";
-                RemainAfterExit = true;
-              };
-              script = ''
-                # -o/-g matter: microvm.nix pre-creates share sources owned
-                # by the microvm user; this directory must stay root-only.
-                install -d -m 0700 -o root -g root ${credsDir w.name}
-                install -m 0400 ${cfg.credentials.claudeTokenFile} ${credsDir w.name}/claude-token
-                install -m 0400 ${cfg.credentials.codexAuthFile} ${credsDir w.name}/codex-auth.json
-                ${optionalString (cfg.credentials.openrouterKeyFile != null) ''
-                  install -m 0400 ${cfg.credentials.openrouterKeyFile} ${credsDir w.name}/openrouter-key
-                ''}
-              '';
-            })
-          ]) cfg.workers
+          ) cfg.workers
         );
       };
     };
