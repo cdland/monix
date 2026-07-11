@@ -74,6 +74,12 @@ in
           aliases = [ "gpt-oss" ];
         };
 
+        # Family budgeting: Actual Budget on :5006 (actual.mod.nix) —
+        # tailnet-direct, plus budget web access through the existing
+        # Cloudflare tunnel connector (public hostname + Access policy are
+        # dashboard-side). Egress-fenced to loopback+tailnet; no bank sync.
+        actual.enable = true;
+
         # opencode web UI cockpit seat, exposed through Cloudflare Tunnel.
         # Authentication belongs at the Cloudflare Access layer; do not set
         # cockpit.webEnvFile here unless deliberately re-enabling opencode's
