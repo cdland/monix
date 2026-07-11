@@ -84,6 +84,21 @@ in
         # Access policy live in the Zero Trust dashboard.
         actual.tunnelTokenFile = config.secrets.actual-cloudflare-tunnel-token.path;
 
+        # Family Matrix homeserver (matrix.mod.nix): tuwunel, federation
+        # OFF, token-gated registration, chat.su.is through its own
+        # Cloudflare tunnel (NO Access app — Matrix does its own auth).
+        # The chat rail for the family and, later, the assistant bot.
+        matrix.enable = true;
+        matrix.serverName = "chat.su.is";
+        matrix.registrationTokenEnvFile = config.secrets.matrix-registration-env.path;
+        # Gated on the .age existing so the config builds before the
+        # captain has created the tunnel and provided its token.
+        matrix.tunnelTokenFile =
+          if builtins.pathExists ./matrix-cloudflare-tunnel-token.age then
+            config.secrets.matrix-cloudflare-tunnel-token.path
+          else
+            null;
+
         # opencode web UI cockpit seat, exposed through Cloudflare Tunnel.
         # Authentication belongs at the Cloudflare Access layer; do not set
         # cockpit.webEnvFile here unless deliberately re-enabling opencode's
@@ -116,6 +131,14 @@ in
           };
           actual-cloudflare-tunnel-token = {
             file = ./actual-cloudflare-tunnel-token.age;
+          };
+          matrix-registration-env = {
+            file = ./matrix-registration.env.age;
+          };
+        }
+        // lib.optionalAttrs (builtins.pathExists ./matrix-cloudflare-tunnel-token.age) {
+          matrix-cloudflare-tunnel-token = {
+            file = ./matrix-cloudflare-tunnel-token.age;
           };
         };
 
