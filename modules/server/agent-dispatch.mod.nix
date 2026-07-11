@@ -137,6 +137,7 @@
             guidance_root=${tasksDir}/guidance/${worker}
             work=${work}
             creds=${creds}
+            ready_dir=/run/agents/ready
 
             # ORDER MATTERS in the VM cycle: the share directory may only be
             # recreated while the VM (and its virtiofsd) is stopped — pulling
@@ -148,8 +149,13 @@
             }
 
             reset_work() {
+              rm -f "$ready_dir/${worker}"
               rm -rf "$work"
               install -d -m 0770 -o root -g users "$work"
+            }
+
+            warm_ready() {
+              [ -f "$work/.ready" ] && [ ! -L "$work/.ready" ]
             }
 
             reset_creds() {
@@ -211,6 +217,7 @@
             # mid-task (host switch, failure): requeue them.
             install -d "$running"
             install -d -m 0750 -o root -g users "$guidance_root"
+            install -d -m 0755 -o root -g root "$ready_dir"
             for stale in "$running"/*.md; do
               if [ -e "$stale" ]; then
                 echo "requeueing stranded $(basename "$stale")"
@@ -239,6 +246,30 @@
                 sleep 5
                 continue
               fi
+
+              # A running VMM is not necessarily ready to receive a task: its
+              # guest may still be booting or its agent-task unit may not yet
+              # be polling the virtiofs share. Wait for that unit's fresh
+              # marker before claiming work, so the task heartbeat deadline
+              # never includes a cold or half-ready warm boot.
+              ready_deadline=$(( $(date +%s) + ${toString cfg.stallTimeout} ))
+              while ! warm_ready; do
+                if ! systemctl is-active --quiet microvm@${worker}.service; then
+                  log "warm VM died before becoming ready, recycling"
+                  continue 2
+                fi
+                if [ "$(date +%s)" -ge "$ready_deadline" ]; then
+                  log "warm VM did not become ready within ${toString cfg.stallTimeout}s, recycling"
+                  continue 2
+                fi
+                sleep 1
+              done
+              # The guest-writable exchange is intentionally private to root
+              # and the task users. Publish only this root-owned readiness bit
+              # separately so the unprivileged `fleet health` command can
+              # report warm workers without reading task metadata or prompts.
+              touch "$ready_dir/${worker}"
+              chmod 0644 "$ready_dir/${worker}"
 
               # Wait for a task WITHOUT rebooting the warm VM (inner loop).
               id=""

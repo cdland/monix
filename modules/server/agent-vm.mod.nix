@@ -364,6 +364,11 @@
                 script = ''
                   prompt=${guestTaskMount}/prompt.md
 
+                  # Tell the host drainer that this guest has mounted its task
+                  # share and reached the delivery wait loop. systemd reporting
+                  # the MicroVM active only proves the VMM is running.
+                  touch ${guestTaskMount}/.ready
+
                   # Warm pool: wait for the host to deliver the task, then run it.
                   # Poll by READING the directory (readdir via ls), NOT by statting
                   # a single never-existed filename. A bare `[ -f prompt.md ]` on a

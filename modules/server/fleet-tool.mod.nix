@@ -347,7 +347,11 @@
             for f in "$failed"/*; do [ -d "$f" ] && failed_count=$((failed_count + 1)); done
 
             ${lib.strings.concatMapStringsSep "\n" (w: ''
-              systemctl is-active --quiet microvm@${w.name}.service && warm=$((warm + 1)) || true
+              if systemctl is-active --quiet microvm@${w.name}.service \
+                && [ -f /run/agents/ready/${w.name} ] \
+                && [ ! -L /run/agents/ready/${w.name} ]; then
+                warm=$((warm + 1))
+              fi
               systemctl is-active --quiet agent-dispatch-${w.name}.service && drainers=$((drainers + 1)) || true
             '') cfg.workers}
 
