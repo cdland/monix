@@ -22,6 +22,7 @@ in
   "hosts/fw0/agent-openrouter-key.age".publicKeys = [ fw0 ] ++ admin;
   "hosts/fw0/opencode-web-env.age".publicKeys = [ fw0 ] ++ admin;
   "hosts/fw0/opencode-web-cloudflare-tunnel-token.age".publicKeys = [ fw0 ] ++ admin;
+  "hosts/fw0/actual-cloudflare-tunnel-token.age".publicKeys = [ fw0 ] ++ admin;
   "hosts/fw0/litellm.env.age".publicKeys = [ fw0 ] ++ admin;
   "hosts/fw0/open-webui.env.age".publicKeys = [ fw0 ] ++ admin;
 }

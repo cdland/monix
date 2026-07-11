@@ -79,6 +79,10 @@ in
         # Cloudflare tunnel connector (public hostname + Access policy are
         # dashboard-side). Egress-fenced to loopback+tailnet; no bank sync.
         actual.enable = true;
+        # Budget web seat rides its own Cloudflare tunnel (separate from the
+        # cockpit's) so its exposure is independently revocable; hostname +
+        # Access policy live in the Zero Trust dashboard.
+        actual.tunnelTokenFile = config.secrets.actual-cloudflare-tunnel-token.path;
 
         # opencode web UI cockpit seat, exposed through Cloudflare Tunnel.
         # Authentication belongs at the Cloudflare Access layer; do not set
@@ -110,12 +114,18 @@ in
           opencode-web-cloudflare-tunnel-token = {
             file = ./opencode-web-cloudflare-tunnel-token.age;
           };
+          actual-cloudflare-tunnel-token = {
+            file = ./actual-cloudflare-tunnel-token.age;
+          };
         };
 
         # agenix in this input has no restartUnits option; make the encrypted
         # source an explicit unit trigger so token rotation restarts cloudflared.
         systemd.services.opencode-web-tunnel.restartTriggers = [
           ./opencode-web-cloudflare-tunnel-token.age
+        ];
+        systemd.services.actual-tunnel.restartTriggers = [
+          ./actual-cloudflare-tunnel-token.age
         ];
 
         agentFleet.credentials = {

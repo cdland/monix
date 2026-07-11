@@ -31,8 +31,14 @@
 # the Minecraft world backup project) is designed.
 {
   flake.nixosModules.actual =
-    { config, lib, ... }:
+    {
+      config,
+      lib,
+      pkgs,
+      ...
+    }:
     let
+      inherit (lib.meta) getExe;
       inherit (lib.modules) mkIf;
       inherit (lib.options) mkEnableOption mkOption;
       inherit (lib) types;
@@ -50,6 +56,20 @@
             Listen port (Actual's upstream default; the nixpkgs module
             defaults to 3000, which clashes with common dev servers).
             The Cloudflare public hostname must target this port.
+          '';
+        };
+
+        tunnelTokenFile = mkOption {
+          type = types.nullOr types.path;
+          default = null;
+          description = ''
+            Cloudflare Tunnel connector token for the budget hostname;
+            null = tailnet-only, no public web access. This is Actual's OWN
+            tunnel (not the opencode cockpit's), so the budget app's public
+            ingress can be revoked independently of the cockpit seat. The
+            public hostname -> http://127.0.0.1:<port> mapping and the
+            Access application guarding it are managed in Cloudflare Zero
+            Trust, not here.
           '';
         };
       };
@@ -88,6 +108,35 @@
             "100.64.0.0/10" # tailnet (CGNAT range)
           ];
           IPAddressDeny = "any";
+        };
+
+        # Public web ingress: a dedicated cloudflared connector (cf. the
+        # opencode-web-tunnel in cockpit.mod.nix). It dials OUT to
+        # Cloudflare's edge and proxies the dashboard-configured hostname to
+        # Actual over loopback — no inbound port. Cloudflare Access in front
+        # is the authentication layer; Actual's server password sits under it.
+        systemd.services.actual-tunnel = mkIf (cfg.tunnelTokenFile != null) {
+          description = "Cloudflare Tunnel for Actual Budget";
+          wantedBy = [ "multi-user.target" ];
+          partOf = [ "actual.service" ];
+          wants = [
+            "network-online.target"
+            "actual.service"
+          ];
+          after = [
+            "network-online.target"
+            "actual.service"
+          ];
+          serviceConfig = {
+            DynamicUser = true;
+            LoadCredential = [ "token:${cfg.tunnelTokenFile}" ];
+            ExecStart = "${getExe pkgs.cloudflared} tunnel --no-autoupdate run --token-file %d/token";
+            Restart = "always";
+            RestartSec = 5;
+          };
+          environment = {
+            TUNNEL_TRANSPORT_PROTOCOL = "http2";
+          };
         };
       };
     };
