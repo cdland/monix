@@ -54,14 +54,15 @@
         # the GTK theme DMS's generated gtk.css targets; qt5ct covers
         # remaining Qt5 apps.
         #
-        # TODO(qt-theming): nixpkgs' kdePackages.qt6ct is built WITHOUT the
-        # fork's KDE/KColorScheme support (nixpkgs issue #489021), so DMS's
-        # "Apply Qt Themes" silently does nothing for Qt6 apps. Revisit:
-        # either overlay qt6ct with the KDE patch (see the AUR qt6ct-kde
-        # recipe) or switch to DMS's QT_QPA_PLATFORMTHEME=gtk3 passthrough.
-        # GTK theming is unaffected. DMS owns the generated
-        # files at runtime (gtk.css, qt5ct/qt6ct configs, color schemes) —
-        # nothing under home-manager may manage those paths.
+        # Qt6 theming has two halves. KDE apps (Dolphin, Ark) ignore qt6ct
+        # palettes entirely and follow ~/.config/kdeglobals → DMS's matugen
+        # KColorScheme instead — wired in kde.mod.nix. Non-KDE Qt6 apps read
+        # the qt6ct palette, but nixpkgs' kdePackages.qt6ct is built WITHOUT
+        # the fork's KColorScheme support (nixpkgs issue #489021), so DMS's
+        # "Apply Qt Themes" does nothing for them; live with it, or overlay
+        # qt6ct-kde if it ever grates. GTK theming is unaffected. DMS owns
+        # the generated files at runtime (gtk.css, qt5ct/qt6ct configs,
+        # color schemes) — nothing under home-manager may manage those paths.
         programs.dms-shell.enableDynamicTheming = true;
         environment.systemPackages = [
           pkgs.adw-gtk3

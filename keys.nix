@@ -1,8 +1,8 @@
 # SSH public keys used both for `agenix` secret encryption and for SSH access.
-# Replace every placeholder below with real keys BEFORE deploying or creating secrets.
 #
 #   Host keys  - on each machine run `cat /etc/ssh/ssh_host_ed25519_key.pub`.
-#                On a brand-new machine, generate them first with `ssh-keygen -A`.
+#                On a brand-new machine, generate them first with `ssh-keygen -A`,
+#                add the key here, then `agenix -r` to rekey existing secrets.
 #   Admin keys - your personal public key(s), e.g. `cat ~/.ssh/id_ed25519.pub`.
 #
 # This file is the single source of truth for keys: it is imported both by
