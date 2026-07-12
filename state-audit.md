@@ -15,7 +15,9 @@ Password changes are now `mkpasswd -m yescrypt` →
 `agenix -e hosts/fw3/dylan-password.age` → switch (`passwd` no longer
 sticks; see the comment in `hosts/fw3/fw3.mod.nix`).
 
-Still open for fw0: same treatment for its user before it can go immutable.
+fw0 got the same treatment later the same day (`hosts/fw0/secrets/
+max-password.age`, switch verified) — both hosts now run fully declarative
+accounts.
 
 ## Open: one-time checks on fw3
 
