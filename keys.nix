@@ -6,7 +6,7 @@
 #   Admin keys - your personal public key(s), e.g. `cat ~/.ssh/id_ed25519.pub`.
 #
 # This file is the single source of truth for keys: it is imported both by
-# `secrets.nix` (consumed by the agenix CLI) and by `modules/keys.mod.nix`
+# `secrets.nix` (consumed by the agenix CLI) and by `modules/core/keys.mod.nix`
 # (which exposes the keys as flake outputs `keys` and `keys-admin`).
 {
   hosts = {

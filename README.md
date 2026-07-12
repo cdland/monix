@@ -23,12 +23,19 @@ registers *aspects* into one of three collections:
 - `homeModules` — Home Manager aspects applied to the primary user.
 
 Packages follow one convention: a tool that carries configuration gets its own
-concern file with package and settings together (`modules/git.mod.nix`,
-`modules/ghostty.mod.nix`); config-less tools are grouped in
+concern file with package and settings together (`modules/cli/git.mod.nix`,
+`modules/cli/ghostty.mod.nix`); config-less tools are grouped in
 `modules/packages.mod.nix` as functional bundles; Nix-workflow tools sit with the
-Nix concern in `modules/nix.mod.nix`. There is no separate `home/` directory — a
-concern file registers its Home Manager aspect directly, and may also register a
-NixOS aspect (as `hyprland.mod.nix` does for the compositor and the session).
+Nix concern in `modules/core/nix.mod.nix`. There is no separate `home/` directory —
+a concern file registers its Home Manager aspect directly, and may also register a
+NixOS aspect (as `desktop/hyprland.mod.nix` does for the compositor and the
+session).
+
+The folders under `modules/` are namespacing only (discovery is by the
+`.mod.nix` suffix, not location): `core/` is the every-host base layer,
+`cli/` terminal tools, `desktop/` the graphical session, `networking/` and
+`server/` what their names say. `packages.mod.nix` and `cockpit.mod.nix`
+sit at the root because they span categories.
 
 `lib/` extends nixpkgs' lib under its own namespace. `lib.monix.nixosSystem
 "<name>" <module>` defines `nixosConfigurations.<name>`.
