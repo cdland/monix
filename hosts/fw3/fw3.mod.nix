@@ -133,6 +133,28 @@ in
         # USER: login shell is NixOS's default (bash) — a plain POSIX $SHELL
         # for tools that shell out (nvim, lf, tmux). The interactive shell is
         # nushell, launched by ghostty (see ghostty.mod.nix).
+        #
+        # DECLARATIVE USERS — DISABLED until the password secret exists.
+        #
+        # With mutableUsers = false, /etc/shadow is regenerated from the
+        # config on every activation; a user with no declared password is
+        # LOCKED OUT (wheel sudo needs a password, so SSH keys won't save
+        # you). The block below must only be enabled together, and only
+        # after the real secret exists. TO ENABLE:
+        #
+        #   1. mkpasswd -m yescrypt        # enter the login password, copy the hash
+        #   2. cd ~/ark/monix && agenix -e hosts/fw3/dylan-password.age
+        #      (paste the hash as the file's only line; the rule is already
+        #      in secrets.nix, encrypted to fw3's host key + admin)
+        #   3. uncomment (adding `config` to this module's args), build, and
+        #      switch — verify `sudo -v` works on the
+        #      NEW generation from a second logged-in session before logging
+        #      out.
+        #
+        # users.mutableUsers = false;
+        # secrets.dylan-password.file = ./dylan-password.age;
+        # users.users.${config.primaryUser}.hashedPasswordFile =
+        #   config.secrets.dylan-password.path;
 
         system.stateVersion = "26.05";
       }
