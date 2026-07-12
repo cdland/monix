@@ -97,6 +97,14 @@
         xdg.portal.enable = true;
         xdg.portal.extraPortals = [ pkgs.xdg-desktop-portal-gtk ];
 
+        # xdg-desktop-portal also ships the flatpak document portal (a FUSE
+        # fs at /run/user/*/doc used to expose picked files to sandboxed
+        # apps). Flatpak isn't installed, nothing here is sandboxed, and the
+        # unit just fails at session start (fusermount3 isn't on its PATH),
+        # leaving the user service manager degraded. Mask it; the hyprland
+        # and gtk portals don't depend on it.
+        systemd.user.units."xdg-document-portal.service".enable = false;
+
         # greetd itself, and the session launch command (start-hyprland when
         # present, see the dms-greeter asset script), are configured by the
         # DankMaterialShell greeter module (see dank.mod.nix).
