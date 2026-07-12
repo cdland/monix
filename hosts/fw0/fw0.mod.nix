@@ -54,15 +54,12 @@ in
         agentFleet.enable = true;
 
         # Matrix alerting (alerts.mod.nix): unit failures and the 6-hourly
-        # sweep post to a room on the local tuwunel. Bootstrap-gated on the
-        # secret existing — TO ENABLE: register @alertbot (token-gated, same
-        # flow as budgetbot), create an alerts room as yourself and INVITE
-        # @alertbot (the bot auto-accepts by calling /join, which needs the
-        # invite), note the room's internal id, then
-        # `agenix -e hosts/fw0/secrets/matrix-alertbot.env.age` with
-        # MATRIX_USER/MATRIX_PASSWORD/ALERT_ROOM_ID, git add, switch.
-        alerts.enable = builtins.pathExists ./secrets/matrix-alertbot.env.age;
-        alerts.credentialsEnvFile = lib.modules.mkIf config.alerts.enable config.secrets.matrix-alertbot-env.path;
+        # sweep post to the Ship Alerts room on the local tuwunel as
+        # @alertbot. Live since 2026-07-12; deliberately NOT gated on the
+        # .age existing — past bootstrap, a missing secret should be a loud
+        # eval error, not silently-disabled alerting.
+        alerts.enable = true;
+        alerts.credentialsEnvFile = config.secrets.matrix-alertbot-env.path;
 
         # Declarative Fabric Minecraft server (see minecraft.mod.nix). Fabric
         # 26.1.2, server-side mods only, ~4G heap in services.slice. Tailnet-only
@@ -178,7 +175,7 @@ in
             file = ./secrets/matrix-cloudflare-tunnel-token.age;
           };
         }
-        // lib.optionalAttrs (builtins.pathExists ./secrets/matrix-alertbot.env.age) {
+        // {
           # The alert bot's Matrix account + room (see alerts wiring above).
           matrix-alertbot-env.file = ./secrets/matrix-alertbot.env.age;
         };
