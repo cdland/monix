@@ -103,7 +103,7 @@ in
         # Budget room, parses purchases with local inference into its own
         # SQLite ledger, answers questions and posts charts. Loopback-only.
         budgetbot.enable = true;
-        budgetbot.roomId = "!HdomhXWkT2WNHYZI5p:chat.su.is";
+        budgetbot.roomId = "!pSYRAx0dRdSkbxwgPr:chat.su.is";
         budgetbot.credentialsEnvFile = config.secrets.matrix-budgetbot-env.path;
 
         # opencode web UI cockpit seat, exposed through Cloudflare Tunnel.
