@@ -78,8 +78,8 @@
           # wallpaper files they reference) from this home into the greeter
           # cache at every greetd start. The greeter wallpaper/theme is
           # therefore not configured anywhere — it follows whatever the
-          # session last used (picked from the declarative folder, see
-          # wallpapers.mod.nix), applied on next boot.
+          # session last used (picked from the repo's assets/wallpapers
+          # folder, by convention), applied on next boot.
           configHome = "/home/${config.primaryUser}";
 
           # dms-greeter's built-in default Hyprland config disables the logo

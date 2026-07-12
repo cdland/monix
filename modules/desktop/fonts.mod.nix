@@ -18,12 +18,12 @@
       # world-readable store path. TO CREATE THE SECRET:
       #
       #   tar czf /tmp/comic-code.tgz -C <dir containing the .otf files> .
-      #   cd ~/ark/monix && EDITOR="cp /tmp/comic-code.tgz" agenix -e fonts/comic-code.age
-      #   git add fonts/comic-code.age && rm /tmp/comic-code.tgz
+      #   cd ~/ark/monix && EDITOR="cp /tmp/comic-code.tgz" agenix -e assets/fonts/comic-code.age
+      #   git add assets/fonts/comic-code.age && rm /tmp/comic-code.tgz
       #
       # The whole block is gated on the (git-tracked) ciphertext existing, so
       # clones without the secret still evaluate.
-      comicCodeAge = ../../fonts/comic-code.age;
+      comicCodeAge = ../../assets/fonts/comic-code.age;
       hasComicCode = builtins.pathExists comicCodeAge;
     in
     {

@@ -21,7 +21,7 @@ in
   # Comic Code (paid font; see modules/desktop/fonts.mod.nix). Encrypted to
   # every desktop host that should ship it — rekey (`agenix -r`) after adding
   # a host here.
-  "fonts/comic-code.age".publicKeys = [ fw3 ] ++ admin;
+  "assets/fonts/comic-code.age".publicKeys = [ fw3 ] ++ admin;
 
   "hosts/fw0/tailscale.age".publicKeys = [ fw0 ] ++ admin;
   "hosts/fw0/agent-claude-token.age".publicKeys = [ fw0 ] ++ admin;
