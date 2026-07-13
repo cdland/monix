@@ -596,7 +596,7 @@
           generation="$(readlink -f /run/current-system)"; generation="''${generation#/nix/store/}"
           failed_units="$(systemctl --failed --no-legend --no-pager | wc -l)"
 
-          printf '%s╭─ ASTRAPIA // SHIP STATUS ────────────────────────────────────────────────╮%s\n' "$cyan$bold" "$reset"
+          printf '%s╭─ FW0 // SHIP STATUS ─────────────────────────────────────────────────────╮%s\n' "$cyan$bold" "$reset"
           printf '│ %sHOST%s  %-16s kernel %-12s up %-9s load %s %s %s\n' \
             "$bold" "$reset" "$(hostname)" "$(uname -r)" "$(duration "$up")" "$load1" "$load5" "$load15"
           cpu="$(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)"

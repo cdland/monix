@@ -243,25 +243,22 @@ in
         # guests are cheap (cloud-hypervisor demand-pages RAM; an idle guest
         # holds only a few hundred MB), and the fleet's real usage is capped
         # fleet-wide by the agents.slice budget. Pool size is just this number.
-        # The ten drones of the ship ASTRAPIA, each named for a genus of
-        # bird-of-paradise (Paradisaeidae) with its roster digit — Astrapia
-        # itself is reserved for the ship as a whole. Names feed tap
-        # interface ids ("vm-<name>", kernel cap 15 chars), so every name
-        # here must stay ≤ 12 chars (vm-paradigalla9 is exactly 15).
-        agentFleet.workers = lib.lists.imap0 (i: genus: {
-          name = "${genus}${toString i}";
-          index = i + 1;
-        }) [
-          "paradisaea"
-          "lophorina"
+        # The eight drones, each named for a genus of bird-of-paradise
+        # (Paradisaeidae) — one per distinct initial letter in the family
+        # (A C D E L M P S), so no two share a first letter. No roster digit
+        # in the name. Names feed tap interface ids ("vm-<name>", kernel cap
+        # 15 chars); all fit. Crew of ten: captain, engineer, eight drones.
+        # (Ship name TBD — Astrapia, once reserved for the vessel, now flies
+        # as a drone.)
+        agentFleet.workers = lib.lists.imap1 (index: name: { inherit name index; }) [
+          "astrapia"
           "cicinnurus"
-          "parotia"
-          "ptiloris"
+          "drepanornis"
           "epimachus"
-          "seleucidis"
-          "semioptera"
+          "lophorina"
           "manucodia"
-          "paradigalla"
+          "paradisaea"
+          "seleucidis"
         ];
 
         # BOOTSTRAP LOGIN — no password is committed here (this repo is
