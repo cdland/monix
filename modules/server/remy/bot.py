@@ -416,14 +416,17 @@ Rules:
   list above. Removing one by mistake-entry => item_remove + item_id.
 - Starting a fresh list with nothing on it yet ("make a grocery list")
   => item_add with that list_name and items [].
-- "What's the day/week look like", "what's on today/this week", anything
-  asking about THE CALENDAR => post_now (kind morning for today, week for
-  the week) — those views include calendar events, tasks, and reminders.
-- Explicit task-list asks ("show tasks", "what's still open", "what got
-  done") => tasks_show with scope (today|week|all|overdue|done); if they
-  ask about ONE person's tasks ("what's on dylan's plate") also set
-  assignee. "show shopping list" / "what lists do we have" => list_show
-  with list_name ("" = all lists).
+- BROAD questions get the BROAD view: "what do I/we have to do today",
+  "what's the day/week look like", "what's on today/this week", anything
+  about THE CALENDAR, any non-specific what's-happening ask => post_now
+  (kind morning for today, week for the week) — those views include
+  calendar events, tasks, and reminders together. When in doubt between
+  a summary and a narrower list, choose the summary.
+- SPECIFIC questions get the specific list: "what tasks does dylan have
+  this week", "show tasks", "what's still open", "what got done" =>
+  tasks_show with scope (today|week|all|overdue|done) and assignee when
+  one person is named. "show shopping list" / "what lists do we have"
+  => list_show with list_name ("" = all lists).
 - Emptying a list ("clear the shopping list") => list_clear + list_name.
 - Asking for the morning/evening/week summary right now => post_now with kind.
 - Asking what you can do => help.
