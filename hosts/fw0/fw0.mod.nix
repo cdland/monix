@@ -243,10 +243,26 @@ in
         # guests are cheap (cloud-hypervisor demand-pages RAM; an idle guest
         # holds only a few hundred MB), and the fleet's real usage is capped
         # fleet-wide by the agents.slice budget. Pool size is just this number.
-        agentFleet.workers = lib.lists.genList (i: {
-          name = "worker-${toString i}";
+        # The ten drones of the ship ASTRAPIA, each named for a genus of
+        # bird-of-paradise (Paradisaeidae) with its roster digit — Astrapia
+        # itself is reserved for the ship as a whole. Names feed tap
+        # interface ids ("vm-<name>", kernel cap 15 chars), so every name
+        # here must stay ≤ 12 chars (vm-paradigalla9 is exactly 15).
+        agentFleet.workers = lib.lists.imap0 (i: genus: {
+          name = "${genus}${toString i}";
           index = i + 1;
-        }) 10;
+        }) [
+          "paradisaea"
+          "lophorina"
+          "cicinnurus"
+          "parotia"
+          "ptiloris"
+          "epimachus"
+          "seleucidis"
+          "semioptera"
+          "manucodia"
+          "paradigalla"
+        ];
 
         # BOOTSTRAP LOGIN — no password is committed here (this repo is
         # public, and `max` is the wheel/sudo account). On a fresh install,
