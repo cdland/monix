@@ -54,6 +54,8 @@ def norm(component):
         if v is not None:
             out[dst] = v.dt.isoformat()
     out["summary"] = str(component.get("summary", "(untitled)"))
+    # uid lets the bot tell its own task/reminder mirrors from real events.
+    out["uid"] = str(component.get("uid", ""))
     return out if "start" in out else None
 
 
@@ -125,8 +127,21 @@ def push_outbox(cal_cfg):
         "SELECT * FROM cal_outbox WHERE pushed_ts IS NULL ORDER BY id").fetchall()
     for r in rows:
         try:
+            uid = r["uid"] or f"remy-{r['id']}-{r['created_ts']}@remy.local"
+            if r["op"] == "delete":
+                # Removing a mirror whose task/reminder went away; already-
+                # gone is success.
+                try:
+                    calendar.event_by_uid(uid).delete()
+                except caldav.lib.error.NotFoundError:
+                    pass
+                db.execute("UPDATE cal_outbox SET pushed_ts=?, error='' WHERE id=?",
+                           (int(time.time()), r["id"]))
+                db.commit()
+                log.info("deleted '%s' (%s)", uid, r["summary"] or "-")
+                continue
             ev = icalendar.Event()
-            ev.add("uid", f"remy-{r['id']}-{r['created_ts']}@remy.local")
+            ev.add("uid", uid)
             ev.add("summary", r["summary"])
             if len(r["start"]) > 10:
                 # UTC on the wire: a bare TZID with no VTIMEZONE component

@@ -105,6 +105,8 @@ def home_db():
         );
         CREATE TABLE IF NOT EXISTS cal_outbox(
             id INTEGER PRIMARY KEY,
+            op TEXT NOT NULL DEFAULT 'create',  -- create | delete
+            uid TEXT NOT NULL DEFAULT '',   -- iCalendar UID (deterministic for mirrors)
             summary TEXT NOT NULL,
             start TEXT NOT NULL,            -- 'yyyy-mm-dd HH:MM' or all-day 'yyyy-mm-dd'
             created_by TEXT NOT NULL,
@@ -125,9 +127,13 @@ def home_db():
         CREATE TABLE IF NOT EXISTS processed(event_id TEXT PRIMARY KEY, ts INTEGER);
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
     """)
-    # Migration for databases created before assignees existed (2026-07-13).
+    # Migrations for databases created earlier on 2026-07-13.
     if "assignee" not in [r[1] for r in db.execute("PRAGMA table_info(task)")]:
         db.execute("ALTER TABLE task ADD COLUMN assignee TEXT NOT NULL DEFAULT ''")
+    outbox_cols = [r[1] for r in db.execute("PRAGMA table_info(cal_outbox)")]
+    if "op" not in outbox_cols:
+        db.execute("ALTER TABLE cal_outbox ADD COLUMN op TEXT NOT NULL DEFAULT 'create'")
+        db.execute("ALTER TABLE cal_outbox ADD COLUMN uid TEXT NOT NULL DEFAULT ''")
     db.commit()
     return db
 
@@ -283,6 +289,11 @@ def calendar_events(day_from, day_to):
         return [], ""
     out = []
     for ev in data.get("events", []):
+        # Task/reminder mirror-events exist for the phone apps; the posts
+        # already render those as tasks and reminders — don't echo them.
+        uid = ev.get("uid", "")
+        if uid.startswith("remy-task-") or uid.startswith("remy-rem-"):
+            continue
         try:
             d = date.fromisoformat(ev["start"][:10])
         except Exception:
@@ -492,10 +503,46 @@ def do_remind_add(db, act, sender):
                " VALUES(?,?,?,?,?)", (text, at, who, sender, int(time.time())))
     db.commit()
     r = db.execute("SELECT * FROM reminder ORDER BY id DESC LIMIT 1").fetchone()
+    queue_cal(db, "create", rem_uid(r["id"]),
+              f"⏰ {text}{' — ' + who if who else ''}", at, sender)
     return f"⏰ will do — {fmt_reminder(r)}"
 
 
 OUTBOX_FLAG = os.path.join(os.path.dirname(DB_PATH), "outbox.flag")
+
+
+def queue_cal(db, op, uid, summary="", start="", sender=""):
+    """Queue a calendar create/delete and poke the credentialed sync unit
+    (a systemd path unit watches the flag file); it hits Migadu within
+    seconds. Tasks and reminders mirror onto the calendar through here
+    with deterministic uids, so moving/finishing them updates the event.
+    """
+    db.execute("INSERT INTO cal_outbox(op,uid,summary,start,created_by,created_ts)"
+               " VALUES(?,?,?,?,?,?)", (op, uid, summary, start, sender, int(time.time())))
+    db.commit()
+    try:
+        with open(OUTBOX_FLAG, "w") as f:
+            f.write(str(time.time()))
+    except OSError:
+        log.exception("outbox flag write failed")  # 30-min timer still delivers
+
+
+def task_uid(task_id):
+    return f"remy-task-{task_id}@remy.local"
+
+
+def rem_uid(rem_id):
+    return f"remy-rem-{rem_id}@remy.local"
+
+
+def sync_task_event(db, task_id):
+    """Make the calendar mirror match the task row: delete the old event,
+    re-create if the task is open and dated (all-day on the due day)."""
+    r = db.execute("SELECT * FROM task WHERE id=?", (task_id,)).fetchone()
+    queue_cal(db, "delete", task_uid(task_id))
+    if r and not r["deleted"] and r["done_ts"] is None and r["due"]:
+        queue_cal(db, "create", task_uid(task_id),
+                  f"☐ {r['title']}{fmt_who(r)}", r["due"], r["created_by"])
 
 
 def do_cal_add(db, act, sender):
@@ -503,16 +550,19 @@ def do_cal_add(db, act, sender):
     at = valid_at(act.get("at")) or valid_date((act.get("at") or "").strip()[:10])
     if not title or not at:
         return "Put what on the calendar, when? ('dentist on the calendar tuesday at 3')"
+    row_ts = int(time.time())
     db.execute("INSERT INTO cal_outbox(summary,start,created_by,created_ts)"
-               " VALUES(?,?,?,?)", (title, at, sender, int(time.time())))
+               " VALUES(?,?,?,?)", (title, at, sender, row_ts))
     db.commit()
-    # Poke the credentialed sync unit (a systemd path unit watches this
-    # file); the event is on Migadu within seconds.
+    r = db.execute("SELECT id FROM cal_outbox ORDER BY id DESC LIMIT 1").fetchone()
+    db.execute("UPDATE cal_outbox SET uid=? WHERE id=?",
+               (f"remy-chat-{r['id']}-{row_ts}@remy.local", r["id"]))
+    db.commit()
     try:
         with open(OUTBOX_FLAG, "w") as f:
             f.write(str(time.time()))
     except OSError:
-        log.exception("outbox flag write failed")  # 30-min timer still delivers
+        log.exception("outbox flag write failed")
     d = date.fromisoformat(at[:10])
     when = d.strftime("%a %b %-d") + (f" {at[11:]}" if len(at) > 10 else " (all day)")
     return f"🗓 {title} — {when}, putting it on the calendar now"
@@ -525,6 +575,7 @@ def do_remind_cancel(db, act):
         return "Couldn't tell which reminder — use its #id ('cancel reminder 2')."
     db.execute("UPDATE reminder SET deleted=1 WHERE id=?", (r["id"],))
     db.commit()
+    queue_cal(db, "delete", rem_uid(r["id"]))
     return f"🗑 cancelled {fmt_reminder(r)}"
 
 
@@ -544,6 +595,8 @@ def do_task_add(db, act, sender):
                (title, due, who, sender, int(time.time())))
     db.commit()
     r = db.execute("SELECT * FROM task ORDER BY id DESC LIMIT 1").fetchone()
+    if due:
+        sync_task_event(db, r["id"])
     return f"✓ added {fmt_task(r)}"
 
 
@@ -559,6 +612,8 @@ def do_task_done(db, act, sender):
     db.execute("UPDATE task SET done_ts=?, done_by=? WHERE id=?",
                (int(time.time()), sender, r["id"]))
     db.commit()
+    if r["due"]:
+        sync_task_event(db, r["id"])
     return f"✔ nice — {r['title']} done"
 
 
@@ -577,6 +632,7 @@ def do_task_edit(db, act):
         return "Nothing to change that I understood."
     db.execute(f"UPDATE task SET {','.join(changes)} WHERE id=?", (*params, r["id"]))
     db.commit()
+    sync_task_event(db, r["id"])
     return "✏️ " + fmt_task(db.execute("SELECT * FROM task WHERE id=?", (r["id"],)).fetchone())
 
 
@@ -589,6 +645,7 @@ def do_task_snooze(db, act):
         return "Move it to when? ('push #3 to friday')"
     db.execute("UPDATE task SET due=?, done_ts=NULL WHERE id=?", (due, r["id"]))
     db.commit()
+    sync_task_event(db, r["id"])
     return "⏰ " + fmt_task(db.execute("SELECT * FROM task WHERE id=?", (r["id"],)).fetchone())
 
 
@@ -598,6 +655,8 @@ def do_task_delete(db, act):
         return "Couldn't tell which task to remove — use its #id."
     db.execute("UPDATE task SET deleted=1 WHERE id=?", (r["id"],))
     db.commit()
+    if r["due"]:
+        sync_task_event(db, r["id"])
     return f"🗑 removed {fmt_task(r)} (say 'restore #{r['id']}' to undo)"
 
 
@@ -607,6 +666,8 @@ def do_task_restore(db, act):
         return "Nothing deleted under that #id."
     db.execute("UPDATE task SET deleted=0 WHERE id=?", (r["id"],))
     db.commit()
+    if r["due"]:
+        sync_task_event(db, r["id"])
     return "↩️ restored " + fmt_task(r)
 
 
