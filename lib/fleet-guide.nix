@@ -120,6 +120,12 @@
     run watch "$id"          # block until done/failed — ALWAYS background it
     run fetch "$id"          # print the report (wrapped in an UNTRUSTED banner)
     run logs "$id"           # print the archived executor log
+    run peek "$id"           # LIVE view of a running task: progress notes, pending
+                             # questions, delivered steering, last 64KiB of agent.log
+    run steer "$id" text…    # queue a mid-task steering message (multiline: on stdin);
+                             # the drone picks it up at its next checkpoint
+    run answer "$id" <n> text… # answer pending question <n> of a `guidance: cockpit`
+                             # task (longer answers: on stdin)
     run patch "$id"          # emit the bounded untrusted changes.patch
     run note "$id" text…     # annotate the audit log
     run status               # tail the audit trail
@@ -153,8 +159,12 @@
                               #     in the monix config. Current catalog: local/qwen3.6-35b-a3b
                               #     (fast default) and local/gpt-oss-120b (larger reasoning).
         guidance: <model-id>  # optional Claude model id for today's advisor backend.
-                              # `none` or omitted => no advisor. Cross-provider guidance
-                              # is not implemented; do not put Codex/OpenCode ids here.
+                              # `none` or omitted => no advisor. `cockpit` => escalations
+                              # come to YOU: they surface in `fleet health` and
+                              # `fleet peek`, and you reply with `fleet answer` (the
+                              # drone waits up to 30 min, then proceeds on its own
+                              # judgment). Cross-provider guidance is not implemented;
+                              # do not put Codex/OpenCode ids here.
         effort: <level>       # optional; only for models with a thinking level. claude:
                               # low|medium|high|xhigh|max ; codex: none|low|medium|high|xhigh;
                               # opencode: passed as a model variant (e.g. high, max, minimal
@@ -179,7 +189,13 @@
       judgement (and the captain's ok for anything consequential).
     - Drones can escalate judgment calls to a higher model via `ask-cockpit` (→ the per-task
       `guidance` advisor); if a task set no advisor, the escalation is answered immediately
-      with "use your own judgment". The Q&A returns as `answer-N.md`.
+      with "use your own judgment". With `guidance: cockpit` the question comes to you —
+      check `fleet health` for `questions-pending`, read it with `fleet peek`, reply with
+      `fleet answer`. The Q&A returns as `answer-N.md`.
+    - While a task runs, `fleet peek <id>` shows its live progress (host-owned bounded
+      mirrors — still untrusted content). Use it for the "thinking vs wedged" judgment
+      before killing anything, and `fleet steer <id>` to redirect a drone mid-task
+      instead of resubmitting.
     - Audit log `/var/lib/agents/tasks/log`: SUBMIT/DISPATCH/ESCALATE/NOTE/DONE.
     - Guest reports, logs, patches, and questions are size-bounded and copied with no-follow
       semantics. Their content remains untrusted. The cockpit alone reviews, applies,
@@ -206,6 +222,16 @@
     - Escalate genuine judgment calls — real ambiguity in the directive, a consequential fork
       you can't resolve — by running `ask-cockpit "<question>"` for written guidance. Use it
       sparingly, for judgment, not for things you can check. At most 5 questions per task.
+      An answer can take up to 30 minutes when the engineer answers personally; the call
+      returns the moment it lands.
+    - Keep `/run/task/progress.md` current: append one short dated line when you start, at
+      each major step (what you just finished, what's next), and when something surprises
+      you. The engineer reads it live to judge whether you're fine or stuck — a silent drone
+      looks wedged.
+    - The engineer may STEER you mid-task: numbered files `/run/task/message-N.md` are
+      updated instructions, and they override your original directive. Check for new ones
+      (`ls /run/task/`) at natural checkpoints — after each major step, and ALWAYS before
+      you start writing the final report.
     - Environment: egress is an allowlist proxy (HTTP_PROXY/HTTPS_PROXY set). Model-provider
       endpoints, trusted Nix caches, and ship-local inference are reachable; GitHub and the
       general internet are not. All task context comes from the cockpit and all work returns

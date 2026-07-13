@@ -150,14 +150,17 @@
                   done
                   printf '%s\n' "$*" > "$task/question-$n.md.tmp"
                   mv "$task/question-$n.md.tmp" "$task/question-$n.md"
-                  for _ in $(seq 1 180); do
+                  # 30 min: a `guidance: cockpit` task is answered by the live
+                  # cockpit (possibly a human), which is slower than a model
+                  # advisor. The loop exits the moment an answer lands.
+                  for _ in $(seq 1 360); do
                     if [ -e "$task/answer-$n.md" ]; then
                       cat "$task/answer-$n.md"
                       exit 0
                     fi
                     sleep 5
                   done
-                  echo "no guidance arrived within 15 minutes; proceed on your best judgment"
+                  echo "no guidance arrived within 30 minutes; proceed on your best judgment"
                 '';
               };
 

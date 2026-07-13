@@ -140,6 +140,9 @@
             work=${work}
             creds=${creds}
             ready_dir=/run/agents/ready
+            live_root=${tasksDir}/live
+            steer_spool=${tasksDir}/steer
+            answer_spool=${tasksDir}/answers
 
             # ORDER MATTERS in the VM cycle: the share directory may only be
             # recreated while the VM (and its virtiofsd) is stopped — pulling
@@ -343,6 +346,7 @@
               start="$(date +%s)"
               seen_q=" "
               guidance_task="$guidance_root/$id"
+              live="$live_root/$id"
 
               # The warm VM could have died while we waited. Delivering into a
               # dead VM would hang the task until the full taskTimeout, so if it
@@ -361,11 +365,18 @@
               model="$(san "$(fm model "$running/$id.md")")"
               effort="$(san "$(fm effort "$running/$id.md")")"
               guidance="$(san "$(fm guidance "$running/$id.md")")"
+              # Effective advisor after the fleet-wide default is applied —
+              # the same resolution the ESCALATE log line uses.
+              effective_guidance="''${guidance:-${cfg.guidanceModel}}"
               if ! stage_credential; then
                 log "rejected $id (unsupported executor credential selection)"
               fi
               stage_metadata
               install -d -m 0770 -o root -g users "$guidance_task"
+              # Readers-visible live view of this running task: the drainer
+              # mirrors bounded guest progress/questions here so `fleet peek`
+              # never has to read the guest-writable share itself.
+              install -d -m 0750 -o root -g ${readers} "$live"
 
               # Stage context and the one selected credential first. Publish
               # prompt.md LAST so the waiting guest cannot begin with a partial
@@ -387,6 +398,8 @@
               hard_deadline=$(( $(date +%s) + ${toString cfg.taskTimeout} ))
               last_progress=$(date +%s)
               last_hb=0
+              last_pm=0
+              last_am=0
               status=timeout
               while :; do
                 now=$(date +%s)
@@ -429,6 +442,91 @@
                   break
                 fi
 
+                # LIVE VIEW — mirror the guest's progress notes and a bounded
+                # log tail into the readers-visible live dir whenever they
+                # change, so `fleet peek` reads only host-owned copies (the
+                # same no-follow transfer discipline as archival, applied
+                # mid-task). Content remains untrusted text.
+                pm=$(stat -c %Y "$work/progress.md" 2>/dev/null || echo 0)
+                if [ "$pm" != "$last_pm" ]; then
+                  last_pm=$pm
+                  rm -f "$live/.progress.tmp"
+                  if ${safeTransfer} "$work/progress.md" "$live/.progress.tmp" 1048576 0640; then
+                    chown root:${readers} "$live/.progress.tmp"
+                    mv -f "$live/.progress.tmp" "$live/progress.md"
+                  fi
+                fi
+                am=$(stat -c %Y "$work/agent.log" 2>/dev/null || echo 0)
+                if [ "$am" != "$last_am" ]; then
+                  last_am=$am
+                  rm -f "$live/.log.tmp" "$live/.tail.tmp"
+                  if ${safeTransfer} "$work/agent.log" "$live/.log.tmp" 52428800 0600; then
+                    tail -c 65536 "$live/.log.tmp" > "$live/.tail.tmp"
+                    chown root:${readers} "$live/.tail.tmp"
+                    chmod 0640 "$live/.tail.tmp"
+                    mv -f "$live/.tail.tmp" "$live/agent-tail.log"
+                  fi
+                  rm -f "$live/.log.tmp"
+                fi
+
+                # STEERING — deliver queued cockpit messages into the running
+                # guest. The spool file was written by the operator (cockpit-
+                # authored, trusted content), but is handled with the same
+                # plain-regular-file discipline as queue entries. Numbering is
+                # assigned by the fleet tool against spool+live, so names are
+                # never reused within a task.
+                for sf in "$steer_spool/$id".message-*.md; do
+                  [ -e "$sf" ] || [ -L "$sf" ] || continue
+                  sn="''${sf##*.message-}"
+                  sn="''${sn%.md}"
+                  case "$sn" in
+                    "" | *[!0-9]*) rm -f "$sf"; continue ;;
+                  esac
+                  if [ "$sn" -lt 1 ] || [ "$sn" -gt 32 ]; then
+                    rm -f "$sf"
+                    continue
+                  fi
+                  # No-follow bounded transfer straight to the final name:
+                  # O_EXCL means a guest-planted file at message-N blocks the
+                  # delivery (logged) rather than being followed or replaced.
+                  if ${safeTransfer} "$sf" "$work/message-$sn.md" 65536 0444; then
+                    rm -f "$live/message-$sn.md"
+                    if ${safeTransfer} "$sf" "$live/message-$sn.md" 65536 0640; then
+                      chown root:${readers} "$live/message-$sn.md"
+                    fi
+                    log "STEERED $id message $sn"
+                  else
+                    log "rejected $id steer $sn (unsafe spool entry or blocked delivery)"
+                  fi
+                  rm -f "$sf"
+                done
+
+                # COCKPIT ANSWERS — pick up operator-queued answers for
+                # `guidance: cockpit` escalations and stage them into the
+                # host-owned guidance spool; the existing answer-delivery loop
+                # below then pushes them into the guest.
+                for cf in "$answer_spool/$id".answer-*.md; do
+                  [ -e "$cf" ] || [ -L "$cf" ] || continue
+                  cn="''${cf##*.answer-}"
+                  cn="''${cn%.md}"
+                  case "$cn" in
+                    1 | 2 | 3 | 4 | 5) ;;
+                    *) rm -f "$cf"; continue ;;
+                  esac
+                  if [ ! -e "$guidance_task/answer-$cn.md" ]; then
+                    if ${safeTransfer} "$cf" "$guidance_task/answer-$cn.md" 1048576 0640; then
+                      rm -f "$live/answer-$cn.md"
+                      if ${safeTransfer} "$cf" "$live/answer-$cn.md" 1048576 0640; then
+                        chown root:${readers} "$live/answer-$cn.md"
+                      fi
+                      log "ANSWERED $id question $cn (cockpit)"
+                    else
+                      log "rejected $id answer $cn (unsafe or oversized file)"
+                    fi
+                  fi
+                  rm -f "$cf"
+                done
+
                 # An ask-cockpit question is pending: kick the answerer.
                 # Never let the host advisor touch the live guest-writable
                 # share. Copy bounded regular files into a host-owned spool
@@ -444,6 +542,29 @@
                       1 | 2 | 3 | 4 | 5) ;;
                       *) continue ;;
                     esac
+                    if [ "$effective_guidance" = cockpit ]; then
+                      # The cockpit itself is the advisor: publish the question
+                      # to the readers-visible live dir (surfaced by `fleet
+                      # peek`/`fleet health`) and wait for `fleet answer` via
+                      # the answer spool above. No guidance service involved.
+                      if [ ! -e "$live/question-$qn.md" ] && [ ! -e "$guidance_task/answer-$qn.md" ]; then
+                        rm -f "$live/.question-$qn.tmp"
+                        if ${safeTransfer} "$qf" "$live/.question-$qn.tmp" 65536 0640; then
+                          chown root:${readers} "$live/.question-$qn.tmp"
+                          mv -f "$live/.question-$qn.tmp" "$live/question-$qn.md"
+                        else
+                          log "rejected $id question $qn (unsafe or oversized file)"
+                        fi
+                      fi
+                      case "$seen_q" in
+                        *" $qn "*) : ;;
+                        *)
+                          log "ESCALATE $id question $qn -> cockpit"
+                          seen_q="$seen_q$qn "
+                        ;;
+                      esac
+                      continue
+                    fi
                     spool_q="$guidance_task/question-$qn.md"
                     if [ ! -e "$spool_q" ] && [ ! -e "$guidance_task/answer-$qn.md" ]; then
                       if ${safeTransfer} "$qf" "$spool_q" 65536 0640; then
@@ -529,6 +650,18 @@
                   *) log "rejected $id output $answer_name (invalid answer name)" ;;
                 esac
               done
+              # Preserve the live-view artifacts (already host-owned copies)
+              # in the archive, then retire the live dir and any undelivered
+              # spool entries for this task.
+              if [ -f "$live/progress.md" ]; then
+                install -m 0640 -o root -g ${readers} "$live/progress.md" "$out/progress.md"
+              fi
+              for f in "$live"/message-*.md "$live"/question-*.md; do
+                [ -f "$f" ] || continue
+                install -m 0640 -o root -g ${readers} "$f" "$out/$(basename "$f")"
+              done
+              rm -rf "$live"
+              rm -f "$steer_spool/$id".message-*.md "$answer_spool/$id".answer-*.md
               [ -n "$context_running" ] && rm -f "$context_running"
               rm -rf "$guidance_task"
               reset_work
@@ -593,7 +726,9 @@
           advisor via front-matter `guidance:`, and a task with `guidance: none`
           or no `guidance:` line gets no advisor (escalations are answered
           immediately with "use your own judgment"). A per-task `guidance:`
-          always overrides this.
+          always overrides this. The special value `cockpit` routes escalations
+          to the live cockpit instead of a model: the question is published to
+          the task's live view and answered via `fleet answer`.
         '';
       };
 
@@ -609,6 +744,16 @@
           "d ${tasksDir}/done 0750 root ${readers} -"
           "d ${tasksDir}/failed 0750 root ${readers} -"
           "d ${tasksDir}/rejected 0750 root ${readers} -" # quarantined non-regular queue entries
+          # Live task views: per-task dirs of host-owned mirrors (progress,
+          # log tail, pending questions) that `fleet peek` reads. Created by
+          # the drainer per task, removed when the task is archived.
+          "d ${tasksDir}/live 0750 root ${readers} -"
+          # Operator-writable spools for cockpit -> running-task traffic:
+          # steering messages and answers to `guidance: cockpit` escalations.
+          # The root drainer consumes entries with the same plain-regular-file
+          # discipline as the queue.
+          "d ${tasksDir}/steer 0770 root ${op} -"
+          "d ${tasksDir}/answers 0770 root ${op} -"
           # The audit trail — one line per lifecycle event (SUBMIT / DISPATCH
           # / ESCALATE / DONE / FAILED / NOTE). Group-owned by the operator so
           # the `fleet` tool can append SUBMIT/NOTE lines; the root drainer
@@ -684,6 +829,9 @@
                   *) gmodel="$g" ;;
                 esac
                 case "$gmodel" in
+                  # cockpit-answered escalations never belong to this service;
+                  # leave the question for the drainer/`fleet answer` path.
+                  cockpit) continue ;;
                   "" | none | NONE)
                     printf '%s\n' "No advisor is configured for this task — proceed on your own best judgment." > "$answer.tmp"
                     mv "$answer.tmp" "$answer"

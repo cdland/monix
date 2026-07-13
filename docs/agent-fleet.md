@@ -113,6 +113,9 @@ id=$(run submit fix-lint < task.md)
 run watch "$id"                 # background this in cockpit workflows
 run fetch "$id"                 # untrusted final report and guidance
 run logs "$id"                  # untrusted executor transcript
+run peek "$id"                  # live view of a RUNNING task (untrusted mirrors)
+run steer "$id" "message"       # queue a mid-task steering message
+run answer "$id" 1 "answer"     # answer a pending guidance:cockpit question
 run patch "$id"                 # bounded automatic git diff
 run status                      # recent lifecycle log
 run health                      # current queue, workers, units, memory, disk
@@ -153,7 +156,39 @@ executor cannot authenticate, fail and report that limitation.
 `guidance` is optional. The current advisor implementation invokes Claude Code
 with all tools disallowed, so this value must be a Claude model id. `none` or an
 absent value means no advisor unless a fleet-wide Claude default is configured.
+The special value `cockpit` routes escalations to the live cockpit: the drainer
+publishes the question to the task's live view, `fleet health` flags it as
+`questions-pending`, and the cockpit replies with `fleet answer <id> <n>` (the
+guest waits up to 30 minutes before proceeding on its own judgment).
 Cross-provider guidance needs a future executor-qualified advisor interface.
+
+## Live interaction with a running task
+
+Interactivity crosses the same trust boundary as everything else — bounded
+files, no-follow transfers, untrusted content — so none of it relaxes
+containment:
+
+- **Peek.** The drainer mirrors the guest's `progress.md` (1 MiB cap) and the
+  last 64 KiB of `agent.log` into `/var/lib/agents/tasks/live/<id>/` whenever
+  they change, using the same no-follow bounded transfer as archival.
+  `fleet peek <id>` reads only these host-owned mirrors, never the guest share.
+  Workers are instructed to keep `progress.md` current; peek is the intended
+  input to the human "thinking vs wedged" judgment the heartbeat cannot make.
+- **Steer.** `fleet steer <id> [message]` (64 KiB cap, ≤32 per task) queues a
+  cockpit-authored message in the operator spool `tasks/steer/`; the task's
+  drainer delivers it into the guest as `message-N.md` and logs `STEERED`.
+  Workers are instructed to check for new messages at natural checkpoints and
+  before writing the final report; delivery is host-guaranteed, pickup is
+  instruction-driven. Numbers are never reused within a task.
+- **Answer.** For `guidance: cockpit` tasks, `fleet answer <id> <n>` queues the
+  reply in the operator spool `tasks/answers/`; the drainer stages it into the
+  host-owned guidance spool and the existing answer-delivery path pushes it to
+  the guest. Question numbers remain host-validated to 1–5.
+
+Live artifacts (progress, delivered messages, questions and answers) are
+archived with the task result and the live directory is removed. The host never
+parses or acts on any of this content — it only displays it to the cockpit and
+delivers cockpit-authored files to the guest.
 
 ## Scheduling and lifecycle
 
@@ -201,8 +236,9 @@ enforced. Normal boots do not recursively rescan historical results.
 
 ## Audit trail
 
-`/var/lib/agents/tasks/log` records SUBMIT, DISPATCH, ESCALATE, NOTE, DONE,
-FAILED, STALLED, CAP, OVERSIZE, and rejection events. Front-matter values are
+`/var/lib/agents/tasks/log` records SUBMIT, DISPATCH, ESCALATE, STEER/STEERED,
+ANSWER/ANSWERED, NOTE, DONE, FAILED, STALLED, CAP, OVERSIZE, and rejection
+events. Front-matter values are
 sanitised to one token so prompts cannot forge log fields.
 
 The log is an operational narrative, not tamper-evident evidence:

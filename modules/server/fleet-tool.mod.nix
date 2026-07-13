@@ -62,6 +62,9 @@
           staging="$tasks/staging"
           done_="$tasks/done"
           failed="$tasks/failed"
+          live_root="$tasks/live"
+          steer_spool="$tasks/steer"
+          answer_spool="$tasks/answers"
           log="$tasks/log"
 
           die() { echo "fleet: $*" >&2; exit 2; }
@@ -320,6 +323,118 @@
             cmd_fetch "$base"
           }
 
+          # Live view of a RUNNING task: the host-owned mirrors the drainer
+          # maintains under live/<id>/ — never the guest-writable share.
+          cmd_peek() {
+            local id="''${1:?usage: fleet peek <id>}" live q n
+            valid_id "$id" || die "bad id: $id"
+            live="$live_root/$id"
+            if [ ! -d "$live" ]; then
+              if resolve "$id" >/dev/null; then
+                die "task $id already finished — use fleet fetch $id"
+              fi
+              die "no live view for $id (queued, not yet dispatched, or unknown)"
+            fi
+            echo "===== BEGIN UNTRUSTED LIVE TASK VIEW ($id) ====="
+            if [ -f "$live/progress.md" ]; then
+              echo "----- progress.md -----"
+              cat "$live/progress.md"
+            else
+              echo "(no progress.md yet — the agent has not written one)"
+            fi
+            for q in "$live"/question-*.md; do
+              [ -f "$q" ] || continue
+              n="$(basename "$q" .md)"
+              n="''${n#question-}"
+              echo
+              if [ -f "$live/answer-$n.md" ]; then
+                echo "----- question $n (answered) -----"
+                cat "$q"
+                echo "----- answer $n -----"
+                cat "$live/answer-$n.md"
+              else
+                echo "----- question $n PENDING (reply: fleet answer $id $n) -----"
+                cat "$q"
+              fi
+            done
+            for q in "$live"/message-*.md; do
+              [ -f "$q" ] || continue
+              echo
+              echo "----- delivered steering $(basename "$q") -----"
+              cat "$q"
+            done
+            if [ -f "$live/agent-tail.log" ]; then
+              echo
+              echo "----- agent.log tail (last 64KiB) -----"
+              cat "$live/agent-tail.log"
+            fi
+            echo "===== END UNTRUSTED LIVE TASK VIEW ====="
+          }
+
+          # Queue a mid-task steering message for a running task. Message from
+          # args or stdin. Numbering scans the spool AND the delivered live
+          # copies so a name is never reused within a task.
+          cmd_steer() {
+            local id="''${1:?usage: fleet steer <id> [message...]}"
+            shift || true
+            valid_id "$id" || die "bad id: $id"
+            local p found=
+            for p in "$tasks"/running/*/"$id.md"; do
+              [ -e "$p" ] && found=1
+            done
+            [ -n "$found" ] || die "task $id is not running"
+            local stage
+            stage="$(mktemp "$staging/.steer.XXXXXXXX")"
+            trap 'rm -f "$stage"' EXIT
+            if [ "$#" -ge 1 ]; then printf '%s\n' "$*" > "$stage"; else cat > "$stage"; fi
+            [ -s "$stage" ] || die "empty steering message"
+            [ "$(wc -c <"$stage")" -le 65536 ] || die "steering message too large (>64KiB)"
+            local n published=
+            for n in $(seq 1 32); do
+              [ -e "$live_root/$id/message-$n.md" ] && continue
+              if ln "$stage" "$steer_spool/$id.message-$n.md" 2>/dev/null; then
+                published=$n
+                break
+              fi
+            done
+            [ -n "$published" ] || die "steering limit (32 messages) reached for $id"
+            rm -f "$stage"
+            trap - EXIT
+            printf '%s cockpit STEER  %s message %s by=%s\n' \
+              "$(date '+%F %T')" "$id" "$published" "''${SUDO_USER:-?}" \
+              >>"$log" 2>/dev/null || true
+            echo "steering message $published queued for $id"
+          }
+
+          # Answer a pending `guidance: cockpit` escalation. Answer text from
+          # args or stdin; delivered to the guest by the task's drainer.
+          cmd_answer() {
+            local id="''${1:?usage: fleet answer <id> <n> [answer...]}"
+            local n="''${2:?usage: fleet answer <id> <n> [answer...]}"
+            shift 2 || true
+            valid_id "$id" || die "bad id: $id"
+            case "$n" in
+              1 | 2 | 3 | 4 | 5) ;;
+              *) die "question number must be 1-5" ;;
+            esac
+            [ -f "$live_root/$id/question-$n.md" ] || die "no pending question $n for $id"
+            [ ! -e "$live_root/$id/answer-$n.md" ] || die "question $n already answered"
+            local stage
+            stage="$(mktemp "$staging/.answer.XXXXXXXX")"
+            trap 'rm -f "$stage"' EXIT
+            if [ "$#" -ge 1 ]; then printf '%s\n' "$*" > "$stage"; else cat > "$stage"; fi
+            [ -s "$stage" ] || die "empty answer"
+            [ "$(wc -c <"$stage")" -le 1048576 ] || die "answer too large (>1MiB)"
+            ln "$stage" "$answer_spool/$id.answer-$n.md" 2>/dev/null \
+              || die "answer $n already queued for $id"
+            rm -f "$stage"
+            trap - EXIT
+            printf '%s cockpit ANSWER %s question %s by=%s\n' \
+              "$(date '+%F %T')" "$id" "$n" "''${SUDO_USER:-?}" \
+              >>"$log" 2>/dev/null || true
+            echo "answer $n queued for $id"
+          }
+
           cmd_status() { tail -n "''${1:-20}" "$log" 2>/dev/null || true; }
 
           cmd_active() {
@@ -341,6 +456,15 @@
             local queued=0 running_count=0 done_count=0 failed_count=0
             local warm=0 drainers=0 failed_units disk_use memory
 
+            local pending_q=0 qd qn
+            for f in "$live_root"/*/question-*.md; do
+              [ -f "$f" ] || continue
+              qd="$(dirname "$f")"
+              qn="$(basename "$f" .md)"
+              qn="''${qn#question-}"
+              [ -e "$qd/answer-$qn.md" ] || pending_q=$((pending_q + 1))
+            done
+
             for f in "$queue"/*.md; do [ -e "$f" ] && queued=$((queued + 1)); done
             for f in "$tasks"/running/*/*.md; do [ -e "$f" ] && running_count=$((running_count + 1)); done
             for f in "$done_"/*; do [ -d "$f" ] && done_count=$((done_count + 1)); done
@@ -359,8 +483,19 @@
             disk_use="$(df -P "$tasks" | awk 'NR==2 { print $5 }')"
             memory="$(systemctl show agents.slice -p MemoryCurrent --value 2>/dev/null || echo unknown)"
 
-            printf 'tasks queued=%s running=%s done=%s failed=%s\n' \
-              "$queued" "$running_count" "$done_count" "$failed_count"
+            printf 'tasks queued=%s running=%s done=%s failed=%s questions-pending=%s\n' \
+              "$queued" "$running_count" "$done_count" "$failed_count" "$pending_q"
+            if [ "$pending_q" -gt 0 ]; then
+              for f in "$live_root"/*/question-*.md; do
+                [ -f "$f" ] || continue
+                qd="$(dirname "$f")"
+                qn="$(basename "$f" .md)"
+                qn="''${qn#question-}"
+                [ -e "$qd/answer-$qn.md" ] \
+                  || printf 'ATTENTION pending question %s on %s (fleet peek / fleet answer)\n' \
+                    "$qn" "$(basename "$qd")"
+              done
+            fi
             printf 'fleet warm=%s/${toString (lib.lists.length cfg.workers)} drainers=%s/${toString (lib.lists.length cfg.workers)} failed-units=%s\n' \
               "$warm" "$drainers" "$failed_units"
             printf 'resources agents-memory-bytes=%s disk-use=%s\n' "$memory" "$disk_use"
@@ -396,12 +531,15 @@
             fetch) cmd_fetch "$@" ;;
             logs) cmd_logs "$@" ;;
             patch) cmd_patch "$@" ;;
+            peek) cmd_peek "$@" ;;
+            steer) cmd_steer "$@" ;;
+            answer) cmd_answer "$@" ;;
             run) cmd_run "$@" ;;
             status) cmd_status "$@" ;;
             active) cmd_active ;;
             health) cmd_health "$@" ;;
             note) cmd_note "$@" ;;
-            *) die "usage: fleet {dispatch <slug> <prompt.md> <context-dir>|submit [slug] <prompt.md|watch <id>|fetch <id>|logs <id>|patch <id>|run [slug] <prompt.md|status [n]|active|health|note [id] <text>}" ;;
+            *) die "usage: fleet {dispatch <slug> <prompt.md> <context-dir>|submit [slug] <prompt.md|watch <id>|fetch <id>|logs <id>|patch <id>|peek <id>|steer <id> [msg]|answer <id> <n> [text]|run [slug] <prompt.md|status [n]|active|health|note [id] <text>}" ;;
           esac
         '';
       };
