@@ -1,4 +1,4 @@
-# THE KESTREL — hull fw0
+# THE KESTREL
 
 *Unmanned, semi-autonomous research and development ship.*
 
@@ -89,8 +89,8 @@ and no memories. The fleet has flown more than a hundred and fifty missions.
 ## The Constellation
 
 The Kestrel does not fly alone. A private relay net — the **Constellation** — binds
-the ship to the Captain's outposts, **fw3** among them. From any of them he takes the
-helm; the ship is wherever the Captain is sitting.
+the ship to the Captain's outposts. From any of them he takes the helm; the ship is
+wherever the Captain is sitting.
 
 ---
 
