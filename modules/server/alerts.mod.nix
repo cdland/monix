@@ -226,6 +226,15 @@
               problems=$(printf '%s\n💾 disk over ${toString cfg.diskPercentThreshold}%%:\n%s' "$problems" "$full")
             fi
 
+            # A switch that brought a new kernel (or initrd/kernel params)
+            # only takes effect on reboot; scheduled reboots were considered
+            # and rejected (2026-07-13) in favor of this deliberate signal.
+            booted=$(readlink -f /run/booted-system/kernel)
+            current=$(readlink -f /run/current-system/kernel)
+            if [ "$booted" != "$current" ]; then
+              problems=$(printf '%s\n🔁 running an older kernel than the config — reboot when convenient' "$problems")
+            fi
+
             if [ -n "$problems" ]; then
               msg=$(printf '%s sweep:\n%s' ${hostname} "$problems")
               ${getExe alertSend} "$msg"
