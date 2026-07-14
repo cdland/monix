@@ -59,6 +59,25 @@
               "Bash(nix eval *)"
               "Bash(nix flake *)"
               "Bash(nix run nixpkgs#shellcheck *)"
+              # Read-only observability must never prompt: journals and unit
+              # state are how the cockpit verifies anything. journalctl's
+              # mutating verbs (--vacuum-*, --rotate, --flush) are root-only
+              # and fail as max, so the bare prefix is safe; systemctl gets
+              # only its read verbs (the bare prefix would cover start/stop).
+              "Bash(journalctl*)"
+              "Bash(systemctl status*)"
+              "Bash(systemctl show*)"
+              "Bash(systemctl cat*)"
+              "Bash(systemctl list-units*)"
+              "Bash(systemctl list-timers*)"
+              "Bash(systemctl list-unit-files*)"
+              "Bash(systemctl list-dependencies*)"
+              "Bash(systemctl is-active*)"
+              "Bash(systemctl is-enabled*)"
+              "Bash(systemctl is-failed*)"
+              "Bash(systemctl --failed*)"
+              "Bash(systemctl --user status*)"
+              "Bash(systemctl --user list-units*)"
               "Read(//home/max/ark/monix/**)"
               # Memory reads must never prompt during pre-flight; cover both
               # the real directory and the auto-memory symlink into it.
