@@ -109,6 +109,9 @@
           )
           [ -n "$text" ] || { echo "empty digest from claude" >&2; exit 1; }
           header="📰 $(date '+%A %b %-d') — $slot digest"
+          # Context for the Q&A companion (chat.py): "more on story 3"
+          # needs to know what story 3 was.
+          printf '%s' "$text" > /var/lib/newsbot/last-digest.txt
 
           # ---- post it
           tok=$(mcurl -X POST "$hs/_matrix/client/v3/login" \
@@ -137,6 +140,21 @@
 
           mcurl -X POST -H "Authorization: Bearer $tok" \
             "$hs/_matrix/client/v3/logout" -d '{}' > /dev/null || true
+        '';
+      };
+
+      chatPython = pkgs.python3.withPackages (ps: [ ps.matrix-nio ]);
+
+      # Q&A loop: exports the claude token from the systemd credential,
+      # then hands off to the nio bot (which spawns `claude -p` per
+      # question — hence claude-code on PATH).
+      chat = pkgs.writeShellApplication {
+        name = "newsbot-chat";
+        runtimeInputs = [ pkgs.claude-code ];
+        text = ''
+          CLAUDE_CODE_OAUTH_TOKEN=$(cat "$CREDENTIALS_DIRECTORY/claude-token")
+          export CLAUDE_CODE_OAUTH_TOKEN
+          exec ${chatPython}/bin/python ${./newsbot/chat.py}
         '';
       };
 
@@ -292,6 +310,50 @@
             TimeoutStartSec = "15min";
             # Internet + loopback; LAN/tailnet/fleet stay denied (the
             # remy-calendar-sync egress shape).
+            IPAddressAllow = [
+              "127.0.0.0/8"
+              "::1"
+            ];
+            IPAddressDeny = [
+              "link-local"
+              "multicast"
+              "10.0.0.0/8"
+              "172.16.0.0/12"
+              "192.168.0.0/16"
+              "100.64.0.0/10"
+              "fc00::/7"
+              "fe80::/10"
+            ];
+          };
+        };
+
+        systemd.services.newsbot-chat = {
+          description = "news room Q&A (headless claude per question)";
+          wantedBy = [ "multi-user.target" ];
+          wants = [
+            "tuwunel.service"
+            "newsbot-register.service"
+          ];
+          after = [
+            "tuwunel.service"
+            "newsbot-register.service"
+            "network-online.target"
+          ];
+          environment = {
+            BOT_HS_URL = "http://127.0.0.1:${toString config.matrix.port}";
+            BOT_INVITE_USERS = lib.concatStringsSep "," cfg.inviteUsers;
+            BOT_ROOM_NAME = cfg.roomName;
+            BOT_STATE = "/var/lib/newsbot";
+            CLAUDE_MODEL = cfg.model;
+            HOME = "/var/lib/newsbot";
+          };
+          serviceConfig = sandbox // {
+            ExecStart = getExe chat;
+            EnvironmentFile = cfg.credentialsEnvFile;
+            LoadCredential = "claude-token:${cfg.claudeTokenFile}";
+            Restart = "always";
+            RestartSec = 10;
+            # Same egress shape as news-digest: internet + loopback only.
             IPAddressAllow = [
               "127.0.0.0/8"
               "::1"
