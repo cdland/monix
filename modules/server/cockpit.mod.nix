@@ -59,6 +59,15 @@
               "Bash(nix eval *)"
               "Bash(nix flake *)"
               "Bash(nix run nixpkgs#shellcheck *)"
+              "Bash(nix search *)"
+              "Bash(tailscale status*)"
+              # The captain's standing policy is "commit and test freely,
+              # push only on his word": stage/commit in the flake never
+              # prompts, while push (not listed) always does. The absolute
+              # path is deliberate — the pattern is textual, so the cockpit
+              # must spell the repo as /home/max/ark/monix (no ~).
+              "Bash(git -C /home/max/ark/monix add *)"
+              "Bash(git -C /home/max/ark/monix commit *)"
               # Read-only observability must never prompt: journals and unit
               # state are how the cockpit verifies anything. journalctl's
               # mutating verbs (--vacuum-*, --rotate, --flush) are root-only
@@ -212,8 +221,14 @@
 
         # The cockpit is where secrets get created/rotated (`agenix -e ...`
         # from the repo root) — fleet credentials in particular originate
-        # here (`claude setup-token`, Codex's auth.json).
-        environment.systemPackages = singleton inputs.agenix.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        # here (`claude setup-token`, Codex's auth.json). python3/jq keep
+        # everyday data munging off the `nix shell nixpkgs#python3` path,
+        # which prompted on every use (interpreters are never allowlisted).
+        environment.systemPackages = [
+          inputs.agenix.packages.${pkgs.stdenv.hostPlatform.system}.default
+          pkgs.python3
+          pkgs.jq
+        ];
 
         # OPENCODE WEB — the cockpit from a browser: opencode's bundled
         # server + web UI, running AS the primary user (this is the human's
