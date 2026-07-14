@@ -13,9 +13,10 @@ One bot, three rooms, room-scoped skills:
 
   - "Scratchpad" (created on first start with scratch users configured,
     captain only): the household skill set against its OWN database
-    (scratch.db) — notes, reminders, tasks, quick lists — with NO calendar:
-    nothing mirrors to CalDAV, no calendar sections in views, and no
-    scheduled posts (reminders still fire; summaries on demand).
+    (scratch.db) — notes, reminders, tasks, quick lists. The calendar is
+    READ-only from here: summaries show it, but nothing mirrors to CalDAV
+    and cal_add is refused. No scheduled posts (reminders still fire;
+    summaries on demand).
 
   - "Budget" (the pre-existing room; remy absorbed budgetbot 2026-07-13):
     the complete budgetbot skill set against the same ledger at
@@ -84,9 +85,10 @@ START_MS = int(time.time() * 1000)
 # ---------------------------------------------------------------- databases
 
 class Conn(sqlite3.Connection):
-    # .cal: whether this database's events/tasks/reminders mirror onto the
-    # family calendar. True for the household; the scratchpad deliberately
-    # has no calendar link, so everything downstream of queue_cal no-ops.
+    # .cal: whether this database may WRITE to the family calendar (cal_add
+    # plus task/reminder mirroring). True for the household; the scratchpad
+    # is calendar-read-only — its views show events, but everything
+    # downstream of queue_cal no-ops.
     cal = True
 
 
@@ -408,10 +410,12 @@ def home_parse(db, sender_name, text):
   the calendar tuesday at 3", "add gab's recital to the calendar friday",
   "we have dinner with the smiths saturday 7pm") => cal_add with title and
   at ('yyyy-mm-dd HH:MM', or just 'yyyy-mm-dd' for an all-day event).
-  Calendar = something happening; task = something to do; reminder = a ping.""" if db.cal else """- NO calendar is linked here: an appointment/event ("dentist tuesday at 3")
-  => task_add with its due date, never cal_add. Jotting something down to
-  keep ("note: the wifi password is X", "jot down that gate code", any
-  keep-this with no date and no time) => item_add with list_name "notes"."""
+  Calendar = something happening; task = something to do; reminder = a ping.""" if db.cal else """- The calendar is READ-ONLY here (it shows in summaries, but adding events
+  happens in the Household room): an appointment/event ("dentist tuesday
+  at 3") => task_add with its due date, never cal_add. Jotting something
+  down to keep ("note: the wifi password is X", "jot down that gate code",
+  any keep-this with no date and no time) => item_add with list_name
+  "notes"."""
     system = f"""You classify one message from a {chat_desc} into a JSON list of actions.
 A message may contain SEVERAL actions ("by today we need X, and by friday Y"
 = two task_adds; "add milk, and remind us to call the vet thursday" =
@@ -812,7 +816,7 @@ def week_section(db, start, title="📅 Week ahead:"):
     end = start + timedelta(days=6 - start.weekday())
     tasks = [r for r in open_tasks(db)
              if r["due"] and start.isoformat() <= r["due"] <= end.isoformat()]
-    events, _ = calendar_events(start, end) if db.cal else ([], "")
+    events, _ = calendar_events(start, end)
     if not tasks and not events:
         return f"{title} clear so far."
     by_day = {}
@@ -843,7 +847,7 @@ def morning_post(db):
     if rems:
         lines.append("Reminders today:")
         lines += [f"  ⏰ {r['at'][11:]} {r['text']}{fmt_who(r)}" for r in rems]
-    events, note = calendar_events(now, now) if db.cal else ([], "")
+    events, note = calendar_events(now, now)
     if events:
         lines.append("Calendar:")
         lines += ["  ◦ " + fmt_event(ev) for ev in events]
@@ -879,7 +883,7 @@ def evening_post(db):
         lines += [f"  • #{r['id']} {r['title']}{fmt_who(r)}{fmt_due(r['due'])}" for r in missed]
     tomorrow = now + timedelta(days=1)
     due_tmrw = [r for r in open_tasks(db) if r["due"] == tomorrow.isoformat()]
-    events, _ = calendar_events(tomorrow, tomorrow) if db.cal else ([], "")
+    events, _ = calendar_events(tomorrow, tomorrow)
     if due_tmrw or events:
         lines.append("Tomorrow:")
         lines += [f"  • #{r['id']} {r['title']}{fmt_who(r)}" for r in due_tmrw]
@@ -910,8 +914,9 @@ SCRATCH_HELP = """Your scratchpad — notes, reminders, tasks, quick lists. Exam
 • renew the passport by friday / done 3 / push #3 to monday
 • add batteries to hardware / show hardware list
 • what's on today? / this week? / show tasks
-No calendar here and no scheduled posts — ask when you want a summary.
-(The family calendar lives in the Household room.)"""
+Summaries show the family calendar, but it's read-only from here —
+add events in the Household room. No scheduled posts; ask when you
+want a summary."""
 
 
 # ================================================================ budget
@@ -1237,7 +1242,7 @@ class Bot:
                 "tasks_show": lambda a=act: do_tasks_show(db, a),
                 "cal_add": lambda a=act: (
                     do_cal_add(db, a, sender) if db.cal else
-                    "(no calendar here — calendar things live in the Household room)"),
+                    "(the calendar is read-only here — add events in the Household room)"),
                 "remind_add": lambda a=act: do_remind_add(db, a, sender),
                 "remind_cancel": lambda a=act: do_remind_cancel(db, a),
                 "remind_show": lambda: do_remind_show(db),

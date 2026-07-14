@@ -7,8 +7,8 @@
 #     folding in the family's Migadu calendar.
 #   - "Scratchpad" (created on first start when scratchpad.users is set;
 #     captain only): the same organizer skills against a separate
-#     scratch.db — notes/reminders/quick lists — with no calendar link
-#     and no scheduled posts.
+#     scratch.db — notes/reminders/quick lists. Calendar is read-only
+#     there (shows in summaries, never written); no scheduled posts.
 #   - "Budget" (pre-existing): the complete budgetbot skill set against
 #     the same ledger at /var/lib/budgetbot/budget.db — remy ABSORBED
 #     budgetbot 2026-07-13 (its module is gone; the ledger, its git
@@ -242,7 +242,7 @@
           example = [ "@captain:chat.example.com" ];
           description = ''
             Users invited to the bot's personal scratchpad room (notes,
-            reminders, quick lists; own database, no calendar link, no
+            reminders, quick lists; own database, calendar read-only, no
             scheduled posts). The first entry gets admin power in the
             room. Empty list = no scratchpad room.
           '';
