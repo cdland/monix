@@ -44,6 +44,14 @@ and read 1-2 actual articles. When asked for sources, give bare URLs.
 Plain text only (no markdown syntax), concise (under ~200 words unless
 they clearly want depth), neutral tone. If the question isn't about news
 or current events, answer briefly and helpfully anyway.
+
+EXCEPTION: if (and only if) the message asks you to generate, rerun, or
+post the full news digest itself ("give me the evening digest again",
+"run a fresh digest", "post the morning digest") — do NOT search or
+answer. Reply with EXACTLY [[DIGEST morning]] or [[DIGEST evening]]
+(the slot they named, else whichever fits the current time) and nothing
+else. A question ABOUT a digest story is a normal question, not this.
+
 Output ONLY the reply text."""
 
 
@@ -76,6 +84,7 @@ def ask_claude(question, sender):
     except OSError:
         pass
     prompt = INSTRUCTIONS
+    prompt += time.strftime("\n\nRight now it is %A %H:%M.")
     if digest:
         prompt += f"\n\nThe most recent digest posted to the room (context):\n{digest}"
     prompt += f"\n\nQuestion from {sender}:\n{question}"
@@ -122,6 +131,14 @@ class Bot:
             log.info("question from %s: %r", sender, text[:80])
             try:
                 reply = await asyncio.to_thread(ask_claude, text, sender)
+                if reply.startswith("[[DIGEST"):
+                    slot = "evening" if "evening" in reply else "morning"
+                    # Stamp the request; a systemd path unit fires the
+                    # digest service, which consumes the slot and posts.
+                    with open(os.path.join(STATE_DIR, "run-digest.flag"), "w") as f:
+                        f.write(slot)
+                    await self.send(f"🗞 on it — fresh {slot} digest in a few minutes")
+                    return
                 await self.send(reply[:8000] or "(came back empty — try rephrasing?)")
             except Exception:
                 log.exception("answer failed")

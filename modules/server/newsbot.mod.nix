@@ -95,6 +95,12 @@
           CLAUDE_CODE_OAUTH_TOKEN=$(cat "$CREDENTIALS_DIRECTORY/claude-token")
           export CLAUDE_CODE_OAUTH_TOKEN
           slot=morning; [ "$(date +%H)" -ge 12 ] && slot=evening
+          # A chat-requested rerun stamps the slot it wants (see chat.py).
+          req=/var/lib/newsbot/run-digest.flag
+          if [ -e "$req" ]; then
+            case "$(cat "$req")" in morning|evening) slot=$(cat "$req") ;; esac
+            rm -f "$req"
+          fi
           # Prompt over stdin: --allowedTools is variadic and would eat a
           # positional prompt argument (bit us live: "Input must be
           # provided either through stdin or as a prompt argument").
@@ -384,6 +390,13 @@
             # once) — same posture as remy's scheduled posts.
             Persistent = true;
           };
+        };
+
+        # Chat-requested reruns ("give me the evening digest again"):
+        # chat.py stamps the flag, this fires the digest service.
+        systemd.paths.news-digest = {
+          wantedBy = [ "multi-user.target" ];
+          pathConfig.PathChanged = "/var/lib/newsbot/run-digest.flag";
         };
       };
     };
