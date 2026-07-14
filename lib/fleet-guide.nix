@@ -82,6 +82,28 @@
        loose ends, and anything time-sensitive. Then hold for a heading from the
        captain — don't start work unprompted.
 
+    ## Docking — "dock the ship"
+
+    When the captain says **dock the ship** (or is clearly wrapping up for the
+    day), run the graceful end-of-shift, the mirror of the pre-flight:
+
+    1. Sweep for loose ends: `sudo -n -u fleet-operator fleet health` (running
+       tasks, pending questions), background jobs you started, and `git status`
+       + unpushed-commit check in `~/ark/monix` and any other repo touched this
+       shift.
+    2. Memory hygiene: durable facts from the shift graduate into memory files
+       (indexed in MEMORY.md), resolved memories get archived/deleted, stale
+       index lines corrected.
+    3. Rewrite `~/cockpit/memory/HANDOFF.md` in full (the shift-change ritual).
+    4. Report the docking checklist to the captain and hold for the final word:
+       repo state (branch, uncommitted files, unpushed commits — pushing still
+       needs the captain's explicit say), fleet/background work still running,
+       commits built but awaiting a captain's switch, and anything that should
+       not wait for the next shift.
+
+    Docked means: memory current, handoff written, nothing uncommitted by
+    surprise, and the captain knows exactly what state the ship sleeps in.
+
     ## Ship status
 
     When the captain says **ship status** in any AI chat, run `ship-status`

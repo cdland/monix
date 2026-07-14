@@ -90,6 +90,31 @@
           '';
         };
 
+        # /dock — Claude-specific shortcut for the vendor-neutral spoken
+        # "dock the ship" end-of-shift in AGENTS.md.
+        home.file."cockpit/.claude/commands/dock.md" = {
+          force = true;
+          text = ''
+            ---
+            description: Dock the ship — graceful end-of-shift wrap-up
+            ---
+
+            Run the docking procedure ("dock the ship") from AGENTS.md:
+
+            1. Sweep loose ends: `sudo -n -u fleet-operator fleet health`
+               (running tasks, pending questions), background jobs, and
+               `git status` + unpushed commits in `~/ark/monix` and any other
+               repo touched this shift.
+            2. Memory hygiene: durable facts → memory files (update MEMORY.md
+               index lines); archive/delete resolved memories.
+            3. REWRITE `~/cockpit/memory/HANDOFF.md` in full (shift change).
+            4. Report the docking checklist and hold for the captain's final
+               word: repo state (uncommitted/unpushed — pushing needs his
+               explicit say), work still running, commits awaiting a switch,
+               anything that shouldn't wait for next shift.
+          '';
+        };
+
         # /handoff — Claude-specific shortcut for the vendor-neutral spoken
         # "shift change" in AGENTS.md.
         home.file."cockpit/.claude/commands/handoff.md" = {
