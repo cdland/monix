@@ -108,6 +108,11 @@
           EOF
           )
           [ -n "$text" ] || { echo "empty digest from claude" >&2; exit 1; }
+          # Belt-and-braces against agent narration leaking in ("Now I
+          # have everything..."): the digest proper starts at the 🗞
+          # masthead the prompt mandates.
+          trimmed=$(printf '%s' "$text" | sed -n '/^🗞/,$p')
+          [ -n "$trimmed" ] && text=$trimmed
           header="📰 $(date '+%A %b %-d') — $slot digest"
           # Context for the Q&A companion (chat.py): "more on story 3"
           # needs to know what story 3 was.
