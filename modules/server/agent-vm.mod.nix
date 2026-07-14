@@ -7,18 +7,28 @@
 # allowlist proxy on the bridge IP is structurally the only way out.
 #
 # Ephemerality: the guest root is tmpfs (microvm.nix default) and the nix
-# store is the host's, read-only over virtiofs. The two volume images (store
-# overlay + /workspace scratch) are deleted on every VM start (ExecStartPre
-# below; the runner recreates them blank), so nothing an agent writes
-# survives a restart — a compromised or wedged worker is one
-# `systemctl restart microvm@<name>` from pristine.
+# store is a read-only erofs image of the guest closure (microvm.nix
+# storeOnDisk), opened once at boot. Sharing the host's live store over
+# virtiofs was the warm-VM-rot root cause (diagnosed 2026-07-14): host
+# `nix-optimise` renames hard links over store files, replacing inodes
+# under virtiofsd, and running guests wedge permanently the first time
+# their own closure gets optimised; host gc could likewise delete paths
+# under old-closure guests (they held no gc root). A block-device store
+# decouples guests from all host store churn — and because every worker
+# boots the SAME closure (per-VM identity arrives on the kernel command
+# line, never in the config), nix builds exactly ONE image for the fleet.
+# The two volume images (store overlay + /workspace scratch) are deleted
+# on every VM start (ExecStartPre below; the runner recreates them blank),
+# so nothing an agent writes survives a restart — a compromised or wedged
+# worker is one `systemctl restart microvm@<name>` from pristine.
 #
 # CREDENTIALS: idle guests have an empty read-only credential share. After a
 # task is claimed, the host drainer stages exactly the selected executor's
 # credential and publishes prompt.md last. The guest validates and installs
 # that one credential into the executor's private home; local tasks receive
 # none. The VM is stopped before the host clears the share. Never put secrets
-# in the nix store — guests read the ENTIRE host store.
+# in the nix store — the guest image is built from it, and the cockpit's
+# own store is world-readable on the host anyway.
 {
   flake.nixosModules.agent-guests =
     {
@@ -213,15 +223,24 @@
                   inherit mac;
                 };
 
+                # The guest store is an erofs image of the guest closure, NOT
+                # a share of the host's live store: host store maintenance
+                # (optimise/gc) mutating inodes under virtiofsd was the
+                # warm-VM-rot root cause (see header). The image is opened as
+                # a block device at boot, so even deleting it on the host
+                # cannot touch a running guest.
+                storeOnDisk = true;
+
+                # Per-VM identity travels on the kernel command line (host-
+                # side runner argument — NOT part of the guest closure, which
+                # must stay identical across workers so the fleet shares one
+                # store disk). Adopted at boot by drone-identity below.
+                kernelParams = [
+                  "drone.name=${name}"
+                  "drone.addr=${addr}/24"
+                ];
+
                 shares = [
-                  # The host's store, read-only. Note this exposes the ENTIRE
-                  # host store to the guest — never put secrets in the store.
-                  {
-                    proto = "virtiofs";
-                    tag = "ro-store";
-                    source = "/nix/store";
-                    mountPoint = "/nix/.ro-store";
-                  }
                    # Empty while idle; the host drainer atomically stages only
                    # the credential selected by the claimed task before it
                    # publishes prompt.md.
@@ -257,11 +276,40 @@
               # NETWORKING — static address on the host-only bridge subnet,
               # deliberately NO gateway and NO DNS: the guest cannot route or
               # resolve anything. Squid does all resolving on its behalf.
+              # The address (and hostname) come from the kernel command line
+              # so the closure stays identical across workers; drone-identity
+              # writes the networkd unit into /run before networkd starts.
+              # (A guest could always self-assign any address — per-VM
+              # enforcement never lived here; it lives host-side on the tap.)
               networking.useNetworkd = true;
               networking.useDHCP = false;
-              systemd.network.networks."20-lan" = {
-                matchConfig.MACAddress = mac;
-                address = singleton "${addr}/24";
+              networking.hostName = "drone"; # overridden at boot from cmdline
+              systemd.services.drone-identity = {
+                description = "Adopt per-VM identity from the kernel command line";
+                wantedBy = [ "sysinit.target" ];
+                before = [ "systemd-networkd.service" ];
+                requiredBy = [ "systemd-networkd.service" ];
+                unitConfig.DefaultDependencies = false;
+                serviceConfig.Type = "oneshot";
+                serviceConfig.RemainAfterExit = true;
+                script = ''
+                  name= addr=
+                  read -r cmdline < /proc/cmdline
+                  for word in $cmdline; do
+                    case "$word" in
+                      drone.name=*) name=''${word#drone.name=} ;;
+                      drone.addr=*) addr=''${word#drone.addr=} ;;
+                    esac
+                  done
+                  if [ -n "$name" ]; then
+                    printf '%s' "$name" > /proc/sys/kernel/hostname
+                  fi
+                  if [ -n "$addr" ]; then
+                    mkdir -p /run/systemd/network
+                    printf '[Match]\nType=ether\n\n[Network]\nAddress=%s\n' \
+                      "$addr" > /run/systemd/network/20-lan.network
+                  fi
+                '';
               };
 
               # Everything HTTP(S) goes through the proxy. networking.proxy
@@ -699,11 +747,13 @@
 
               # Local git is used to capture a patch against the cockpit-built
               # baseline. Workers have no forge credentials or GitHub route.
+              # Constant author identity: per-VM values here would fork the
+              # guest closure and break the shared store disk.
               programs.git = {
                 enable = true;
                 config = {
-                  user.name = name;
-                  user.email = "${name}@agents.invalid";
+                  user.name = "drone";
+                  user.email = "drone@agents.invalid";
                 };
               };
 
