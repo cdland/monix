@@ -21,8 +21,9 @@
 # (cache read 0.1x input, cache write 1.25x/5m 2x/1h); GPT-5.6 Sol and
 # GPT-5.5 5/30 (cached in 0.5), Terra 2.5/15, Luna 1/6.
 #
-# Codex sessions also carry the ChatGPT plan's live rate-limit windows —
-# the only sub-limit gauge available on disk — shown with its staleness.
+# No plan-usage gauges here: the on-disk estimates (codex rate-limit
+# snapshots, transcript-derived percentages) proved unreliable — captain
+# removed them 2026-07-14. Check /usage in each app for real gauges.
 {
   flake.nixosModules.ship-costs =
     {
@@ -165,9 +166,7 @@
             # DELTA at each token_count event, timestamped and attributed to
             # the model in force, so sessions spanning a window boundary are
             # split correctly. A decrease means a fresh counter (new session
-            # in-file); treat the new value as its own delta. Also surfaces
-            # the newest rate-limit gauge.
-            gauge = {"ts": None}
+            # in-file); treat the new value as its own delta.
             fields = ("input_tokens", "cached_input_tokens", "output_tokens")
             for path in glob.glob(os.path.join(CODEX_DIR, "**", "*.jsonl"), recursive=True):
                 model = "unknown"
@@ -199,17 +198,10 @@
                                 prev = dict.fromkeys(fields, 0)
                             d = {k: cur[k] - prev[k] for k in fields}
                             prev = cur
-                            rl = p.get("rate_limits")
-                            if rl and (gauge["ts"] is None or ts > gauge["ts"]):
-                                gauge.update({"ts": ts, "rl": rl})
                             if any(d.values()):
                                 yield ev(ts, model, "cockpit codex",
                                          d["input_tokens"] - d["cached_input_tokens"],
                                          d["output_tokens"], d["cached_input_tokens"])
-            iter_codex.gauge = gauge
-
-
-        iter_codex.gauge = {"ts": None}
 
 
         def iter_opencode():
@@ -407,28 +399,6 @@
                 print()
                 emit("OPENROUTER: key configured but API query failed (see the "
                      "above table for opencode-recorded costs).")
-
-            g = iter_codex.gauge
-            print()
-            if g.get("ts"):
-                rl = g.get("rl") or {}
-                age = NOW - g["ts"]
-                parts = []
-                for name in ("primary", "secondary"):
-                    w = rl.get(name)
-                    if w:
-                        wm = w.get("window_minutes", 0)
-                        label = f"{wm // 60}h" if wm < 10080 else f"{wm // 1440}d"
-                        parts.append(f"{label} window {w.get('used_percent', '?')}% used")
-                plan = rl.get("plan_type", "?")
-                emit(f"CHATGPT PLAN ({plan}): " + "; ".join(parts)
-                     + f"  [as of last codex turn, {age.total_seconds() / 3600:.1f}h ago]")
-            else:
-                print("CHATGPT PLAN: no codex sessions found for a limit gauge")
-            emit("CLAUDE PLAN: account-wide window not exposed on disk — check "
-                 "/usage in Claude Code (that gauge includes app chats; this "
-                 "ledger doesn't).")
-
 
         if __name__ == "__main__":
             sys.exit(main())
