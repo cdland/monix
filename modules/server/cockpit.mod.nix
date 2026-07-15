@@ -76,11 +76,17 @@
       # OpenCode evaluates the final matching permission rule. Keep the
       # catch-all first, then append the current Claude-approved capabilities.
       mkOpenCodeRules = patterns: { "*" = "ask"; } // genAttrs patterns (_: "allow");
+      # OpenCode strips the leading slash before checking file-tool paths, but
+      # external_directory checks the same path in absolute form.
+      opencodeFilePermissions = concatMap (path: [
+        "${path}/**"
+        "${lib.strings.removePrefix "/" path}/**"
+      ]) claudeFilePermissions;
       opencodePermissions = {
         bash = mkOpenCodeRules claudeBashPermissions;
-        read = mkOpenCodeRules (map (path: "${path}/**") claudeFilePermissions);
-        edit = mkOpenCodeRules (map (path: "${path}/**") claudeFilePermissions);
-        write = mkOpenCodeRules (map (path: "${path}/**") claudeFilePermissions);
+        read = mkOpenCodeRules opencodeFilePermissions;
+        edit = mkOpenCodeRules opencodeFilePermissions;
+        write = mkOpenCodeRules opencodeFilePermissions;
         external_directory = mkOpenCodeRules (map (path: "${path}/**") claudeFilePermissions);
         # Claude permits its built-in discovery and delegation tools without
         # explicit allowlist entries; preserve that behavior in OpenCode.
