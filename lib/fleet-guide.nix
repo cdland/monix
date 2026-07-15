@@ -76,8 +76,9 @@
 
     1. Read `~/cockpit/memory/HANDOFF.md` and `~/cockpit/memory/MEMORY.md`, and open
        every memory relevant to active work.
-    2. Run `sudo -n -u fleet-operator fleet health` and then `fleet status` (each as a
-       standalone command) for current health plus recent activity.
+    2. Run `sudo -n -u fleet-operator fleet health` and then
+       `sudo -n -u fleet-operator fleet status` (each as a standalone command) for
+       current health plus recent activity.
     3. Report in a few lines: ship status, drone-fleet health, the open backlog and
        loose ends, and anything time-sensitive. Then hold for a heading from the
        captain — don't start work unprompted.
