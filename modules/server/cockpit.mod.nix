@@ -22,10 +22,11 @@
       inherit (lib.modules) mkIf;
       userHome = "/home/${osConfig.primaryUser}";
       monixDir = "${userHome}/ark/monix";
+      cockpitDir = "${userHome}/cockpit";
       cockpitMemoryDir = "${userHome}/cockpit/memory";
       claudeMemoryDir = "${userHome}/.claude/projects/-home-max-cockpit/memory";
-      # Claude's cockpit policy is canonical. Render both frontend-specific
-      # formats from it so a future permission change cannot drift by harness.
+      # Claude's cockpit policy is canonical. Render the shared explicit
+      # permissions in both frontend-specific formats.
       claudeBashPermissions = [
         "sudo -n -u fleet-operator fleet *"
         "fleet dispatch *"
@@ -82,11 +83,20 @@
         "${path}/**"
         "${lib.strings.removePrefix "/" path}/**"
       ]) claudeFilePermissions;
+      # Claude permits reads within its working directory. OpenCode's explicit
+      # read catch-all would otherwise prompt for ordinary cockpit files such
+      # as AGENTS.md, while edits must remain limited to the canonical paths.
+      opencodeReadPermissions = opencodeFilePermissions ++ [
+        "${cockpitDir}/**"
+        "${lib.strings.removePrefix "/" cockpitDir}/**"
+      ];
       opencodePermissions = {
+        # Claude also has a validated read-only command classifier. OpenCode
+        # only has static globs, so unmatched commands must stay prompt-bound
+        # rather than broadening this list unsafely.
         bash = mkOpenCodeRules claudeBashPermissions;
-        read = mkOpenCodeRules opencodeFilePermissions;
+        read = mkOpenCodeRules opencodeReadPermissions;
         edit = mkOpenCodeRules opencodeFilePermissions;
-        write = mkOpenCodeRules opencodeFilePermissions;
         external_directory = mkOpenCodeRules (map (path: "${path}/**") claudeFilePermissions);
         # Claude permits its built-in discovery and delegation tools without
         # explicit allowlist entries; preserve that behavior in OpenCode.
@@ -94,11 +104,35 @@
         grep = "allow";
         list = "allow";
         task = "allow";
+        # OpenCode cannot scope webfetch by domain, so keep it stricter than
+        # Claude's github.com-only allow rather than permitting every domain.
         webfetch = "ask";
         websearch = "allow";
         todowrite = "allow";
         question = "allow";
         skill = "allow";
+      };
+      # Top-level permissions are appended after built-in agent rules. Restore
+      # the restrictions that make Plan non-editing and Explore read-only.
+      opencodePlanPermissions = opencodePermissions // {
+        edit = "deny";
+        task = {
+          "*" = "allow";
+          general = "deny";
+        };
+      };
+      opencodeExplorePermissions = {
+        "*" = "deny";
+        inherit (opencodePermissions)
+          bash
+          external_directory
+          glob
+          grep
+          list
+          read
+          webfetch
+          websearch
+          ;
       };
     in
     {
@@ -132,9 +166,8 @@
               };
             };
             permission = opencodePermissions;
-            # OpenCode's primary built-in agent otherwise appends its permissive
-            # defaults after top-level configuration.
-            agent.build.permission = opencodePermissions;
+            agent.plan.permission = opencodePlanPermissions;
+            agent.explore.permission = opencodeExplorePermissions;
           };
         };
 
