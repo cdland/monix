@@ -13,7 +13,12 @@
 # Gated to non-desktops so fw3 keeps the ghostty path untouched.
 {
   flake.homeModules.interactive-shell =
-    { lib, osConfig, ... }:
+    {
+      config,
+      lib,
+      osConfig,
+      ...
+    }:
     {
       config = lib.mkIf (!osConfig.isDesktop) {
         programs.bash = {
@@ -26,6 +31,27 @@
               export SHIP_NU=1
               exec nu
             fi
+          '';
+        };
+
+        programs.nushell = {
+          enable = true;
+          extraConfig = ''
+            $env.config.show_banner = false
+            $env.PROMPT_COMMAND = {||
+              let home = ($nu.home-dir | path expand)
+              let cwd = ($env.PWD | path expand)
+              let display_path = if $cwd == $home {
+                "~"
+              } else if ($cwd | str starts-with $"($home)/") {
+                $cwd | str replace $home "~"
+              } else {
+                $cwd
+              }
+
+              $"(ansi green)${config.home.username}@${osConfig.networking.hostName}(ansi reset) (ansi blue)($display_path)(ansi reset)"
+            }
+            $env.PROMPT_COMMAND_RIGHT = {|| "" }
           '';
         };
       };
