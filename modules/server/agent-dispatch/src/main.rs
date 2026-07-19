@@ -1635,9 +1635,12 @@ fn usage_summary(path: &Path) -> String {
     if !is_regular_follow(path) {
         return String::new();
     }
+    // Token classes bill at very different rates (cache writes 1.25x, cache
+    // reads 0.1x); summing them reads as spend an order of magnitude too
+    // high, so keep them separate: fresh in / cache write / cache read / out.
     let filter = concat!(
-        "\", \\(.input_tokens + .cache_read_tokens + ",
-        ".cache_creation_tokens) in / \\(.output_tokens) out tok (\\(.model))\"",
+        "\", \\(.input_tokens) in / \\(.cache_creation_tokens) cw / ",
+        "\\(.cache_read_tokens) cr / \\(.output_tokens) out tok (\\(.model))\"",
     );
     Command::new("jq")
         .args(["-r", filter])
