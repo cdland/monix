@@ -572,7 +572,7 @@ impl Dispatcher {
             Credential::File { source, name } => {
                 let temporary = self.config.creds.join(".credential.tmp");
                 remove_any(&temporary)?;
-                copy_trusted_source(source, &temporary, 0o400)?;
+                copy_new(source, &temporary, 0o400, true)?;
                 chown(&temporary, "root:root")?;
                 fs::rename(&temporary, self.config.creds.join(name))
                     .context("publish selected credential")
@@ -1209,13 +1209,7 @@ impl Dispatcher {
     }
 
     fn log(&self, message: &str) -> Result<()> {
-        let timestamp = command_output(Command::new("date").arg("+%F %T"))?;
-        let line = format!(
-            "{} {} {}\n",
-            timestamp.trim_end(),
-            self.config.worker,
-            message
-        );
+        let line = format!("{} {} {}\n", timestamp(), self.config.worker, message);
         print!("{line}");
         let mut log = OpenOptions::new()
             .create(true)
@@ -1383,6 +1377,25 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
+/// `date '+%F %T'` in local time, without the subprocess.
+fn timestamp() -> String {
+    let tm = unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&now, &mut tm);
+        tm
+    };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
+}
+
 fn mtime(path: &Path) -> Option<u64> {
     fs::symlink_metadata(path)
         .ok()
@@ -1489,8 +1502,18 @@ fn write_new_or_replace(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
     write_new(path, contents, mode)
 }
 
-fn copy_regular(source: &Path, destination: &Path, mode: u32) -> Result<()> {
-    if !is_regular_nofollow(source) {
+/// Copy a trusted source to a fresh destination. `follow_source` only for
+/// operator-managed inputs (credentials may live behind agenix symlinks);
+/// worker-reachable paths must pass `false`.
+fn copy_new(source: &Path, destination: &Path, mode: u32, follow_source: bool) -> Result<()> {
+    let regular = if follow_source {
+        fs::metadata(source)
+            .map(|metadata| metadata.file_type().is_file())
+            .unwrap_or(false)
+    } else {
+        is_regular_nofollow(source)
+    };
+    if !regular {
         return Err(format!("{} is not a regular file", source.display()));
     }
     let mut input = File::open(source).with_context(|| format!("open {}", source.display()))?;
@@ -1504,31 +1527,10 @@ fn copy_regular(source: &Path, destination: &Path, mode: u32) -> Result<()> {
     output.sync_all().context("sync copied file")
 }
 
-fn copy_trusted_source(source: &Path, destination: &Path, mode: u32) -> Result<()> {
-    if !fs::metadata(source)
-        .map(|metadata| metadata.file_type().is_file())
-        .unwrap_or(false)
-    {
-        return Err(format!(
-            "{} is not a regular credential file",
-            source.display()
-        ));
-    }
-    let mut input = File::open(source).with_context(|| format!("open {}", source.display()))?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .open(destination)
-        .with_context(|| format!("create {}", destination.display()))?;
-    std::io::copy(&mut input, &mut output).context("copy trusted credential")?;
-    output.sync_all().context("sync copied credential")
-}
-
 fn trusted_copy_replace(source: &Path, destination: &Path, mode: u32) -> Result<()> {
     let temporary = destination.with_extension("tmp");
     remove_any(&temporary)?;
-    copy_regular(source, &temporary, mode)?;
+    copy_new(source, &temporary, mode, false)?;
     rename_replace(&temporary, destination)
 }
 
@@ -1599,21 +1601,26 @@ fn suffix_token<'a>(path: &'a Path, prefix: &str, suffix: &str) -> Option<&'a st
         .and_then(|name| name.strip_suffix(suffix))
 }
 
+/// Apparent size of everything under `path` (the `du -sb` this replaces
+/// summed directory and symlink sizes too; the exchange cap is a guardrail,
+/// not exact accounting, so entry lengths are summed the same way).
 fn directory_apparent_size(path: &Path) -> Result<u64> {
-    let output = Command::new("du")
-        .args(["-sb", "--"])
-        .arg(path)
-        .output()
-        .map_err(|error| format!("run du for {}: {error}", path.display()))?;
-    if !output.status.success() {
-        return Err(format!("du failed for {}", path.display()));
+    let mut total = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect {}", path.display()))?
+        .len();
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in directory_entries(&directory)? {
+            let Ok(metadata) = fs::symlink_metadata(&entry) else {
+                continue;
+            };
+            total = total.saturating_add(metadata.len());
+            if metadata.file_type().is_dir() {
+                pending.push(entry);
+            }
+        }
     }
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| "du returned no size".to_string())?
-        .parse()
-        .map_err(|error| format!("invalid du size: {error}"))
+    Ok(total)
 }
 
 fn optional_field(name: &str, value: &str) -> String {
@@ -1651,14 +1658,6 @@ fn command_success(command: &mut Command) -> Result<bool> {
         .status()
         .map(|status| status.success())
         .map_err(|error| format!("run {command:?}: {error}"))
-}
-
-fn command_output(command: &mut Command) -> Result<String> {
-    let output = command
-        .output()
-        .map_err(|error| format!("run {command:?}: {error}"))?;
-    require_success(output.status, &format!("{command:?}"))?;
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn require_success(status: ExitStatus, action: &str) -> Result<()> {

@@ -179,75 +179,18 @@
 
           agent-guidance = {
             description = "Answer workers' ask-cockpit questions";
-            path = [
-              pkgs.claude-code
-              pkgs.coreutils
-              pkgs.gawk
-            ];
+            path = [ pkgs.claude-code ];
             serviceConfig = {
               Type = "oneshot";
               User = config.primaryUser;
               Group = "users";
               Slice = "agents.slice";
+              ExecStart = "${agentDispatcher}/bin/agent-guidance";
             };
-            script = ''
-              san() { printf '%s' "$1" | tr -cd 'A-Za-z0-9._/-' | cut -c1-64; }
-              while :; do
-                did_work=
-                for q in ${tasksDir}/guidance/*/*/question-*.md; do
-                  if [ ! -e "$q" ]; then
-                    continue
-                  fi
-                  dir="$(dirname "$q")"
-                  n="$(basename "$q" .md)"
-                  n="''${n#question-}"
-                  answer="$dir/answer-$n.md"
-
-                  g="$(san "$(cat "$dir/guidance-model" 2>/dev/null)")"
-                  case "$g" in
-                    none | NONE) gmodel="" ;;
-                    "") gmodel="${cfg.guidanceModel}" ;;
-                    *) gmodel="$g" ;;
-                  esac
-                  case "$gmodel" in
-                    cockpit) continue ;;
-                    "" | none | NONE)
-                      did_work=1
-                      printf '%s\n' "No advisor is configured for this task — proceed on your own best judgment." > "$answer.tmp"
-                      mv "$answer.tmp" "$answer"
-                      rm -f "$q"
-                      continue
-                      ;;
-                  esac
-
-                  did_work=1
-                  echo "answering $q"
-                  guidance="$(
-                    timeout 300 claude -p \
-                      "You supervise a fleet of sandboxed coding/research agents. One of them is working on the task below and has asked you a question. Give concise, decisive guidance it can act on immediately.
-
-              == THE AGENT'S TASK ==
-              $(cat "$dir/prompt.md" 2>/dev/null || echo "(prompt unavailable)")
-
-              == THE AGENT'S QUESTION ==
-              $(cat "$q")" \
-                      --model "$gmodel" \
-                      --disallowedTools Bash Edit Write Read Grep Glob Task WebFetch WebSearch NotebookEdit
-                  )" || guidance="(the supervising model could not be reached; proceed on your best judgment)"
-
-                  {
-                    echo "## Question"
-                    cat "$q"
-                    echo
-                    echo "## Guidance"
-                    printf '%s\n' "$guidance"
-                  } > "$answer.tmp"
-                  mv "$answer.tmp" "$answer"
-                  rm -f "$q"
-                done
-                [ -n "$did_work" ] || break
-              done
-            '';
+            environment = {
+              FLEET_TASKS_DIR = tasksDir;
+              FLEET_GUIDANCE_MODEL = cfg.guidanceModel;
+            };
           };
         }
         // listToAttrs (map (w: nameValuePair "agent-dispatch-${w.name}" (drainerFor w.name)) cfg.workers);

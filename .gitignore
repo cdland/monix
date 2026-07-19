@@ -1,6 +1,7 @@
 result
 result-*
 .direnv/
+target/
 *.qcow2
 *.swp
 __pycache__/

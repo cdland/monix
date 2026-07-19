@@ -1,6 +1,5 @@
 use chrono::Utc;
 use fs2::FileExt;
-use regex::Regex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -133,12 +132,11 @@ impl LoopSpec {
         if !(1..=8).contains(&self.implementation_routes.len()) {
             return Err("implementationRoutes must contain between 1 and 8 routes".into());
         }
-        let token = Regex::new(r"^[A-Za-z0-9._/-]{1,64}$").unwrap();
         for route in &self.implementation_routes {
             if !matches!(route.agent.as_str(), "claude" | "codex" | "opencode") {
                 return Err(format!("unsupported loop agent: {}", route.agent));
             }
-            if !token.is_match(&route.model) {
+            if !valid_token(&route.model) {
                 return Err(format!("invalid model: {}", route.model));
             }
             if route.agent == "opencode"
@@ -148,7 +146,7 @@ impl LoopSpec {
                 return Err("opencode routes require a local/ or openrouter/ model".into());
             }
             for value in [&route.effort, &route.guidance].into_iter().flatten() {
-                if !token.is_match(value) {
+                if !valid_token(value) {
                     return Err(format!("invalid route option: {value}"));
                 }
             }
@@ -176,7 +174,6 @@ impl LoopSpec {
             "maxLedgerBytes",
         )?;
 
-        let id = Regex::new(r"^[A-Za-z0-9._-]{1,80}$").unwrap();
         let mut seen = BTreeSet::new();
         for (class, checks) in [
             ("admission", &self.checks.admission),
@@ -188,7 +185,7 @@ impl LoopSpec {
                 ));
             }
             for check in checks {
-                if !id.is_match(&check.id) || !seen.insert(check.id.clone()) {
+                if !valid_check_id(&check.id) || !seen.insert(check.id.clone()) {
                     return Err(format!("invalid or duplicate check id: {}", check.id));
                 }
                 if check.argv.is_empty()
@@ -223,6 +220,41 @@ fn bounded(value: u64, minimum: u64, maximum: u64, name: &str) -> Result<()> {
     } else {
         Err(format!("{name} must be between {minimum} and {maximum}"))
     }
+}
+
+// The character-class validators the regex dependency used to provide.
+
+/// `^[A-Za-z0-9._/-]{1,64}$`
+fn valid_token(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c))
+}
+
+/// `^[A-Za-z0-9._-]{1,80}$`
+fn valid_check_id(value: &str) -> bool {
+    (1..=80).contains(&value.len())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+}
+
+/// `^[a-z-]{1,32}$`
+fn valid_status_token(value: &str) -> bool {
+    (1..=32).contains(&value.len())
+        && value.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+}
+
+/// `^[a-z0-9][a-z0-9-]{0,40}$`
+fn valid_slug(value: &str) -> bool {
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    value.len() <= 41
+        && (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && characters.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 fn safe_relative(value: &str) -> bool {
@@ -437,10 +469,15 @@ fn object(fields: &[(&str, Value)]) -> Value {
     )
 }
 
+/// `^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$`
 fn validate_id(value: &str) -> bool {
-    Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
-        .unwrap()
-        .is_match(value)
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    value.len() <= 121
+        && first.is_ascii_alphanumeric()
+        && characters.all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 
 fn require_loop(config: &Config, loop_id: &str) -> Result<PathBuf> {
@@ -490,7 +527,7 @@ fn result_status(result_dir: &Path, fallback: &str) -> String {
         && let Ok(value) = fs::read_to_string(path)
     {
         let value = value.trim();
-        if Regex::new(r"^[a-z-]{1,32}$").unwrap().is_match(value) {
+        if valid_status_token(value) {
             return value.to_string();
         }
     }
@@ -723,6 +760,27 @@ fn copy_iteration_outputs(result_dir: &Path, iteration_dir: &Path) -> Result<()>
     Ok(())
 }
 
+/// Park the loop in a paused status; `recovery` records where a later
+/// `resume` should re-enter the state machine.
+fn pause(
+    loop_dir: &Path,
+    state: &mut State,
+    status: &str,
+    reason: &str,
+    recovery: Option<&str>,
+) -> Result<()> {
+    state.status = status.into();
+    state.pause_reason = Some(reason.into());
+    if let Some(recovery) = recovery {
+        state.recovery_status = Some(recovery.into());
+    }
+    save_state(
+        loop_dir,
+        state,
+        Some(("PAUSED", object(&[("reason", Value::from(reason))]))),
+    )
+}
+
 fn advance_route_or_pause(
     loop_dir: &Path,
     state: &mut State,
@@ -746,13 +804,7 @@ fn advance_route_or_pause(
             )),
         )
     } else {
-        state.status = "PAUSED_COCKPIT".into();
-        state.pause_reason = Some(reason.clone());
-        save_state(
-            loop_dir,
-            state,
-            Some(("PAUSED", object(&[("reason", Value::from(reason))]))),
-        )
+        pause(loop_dir, state, "PAUSED_COCKPIT", &reason, None)
     }
 }
 
@@ -873,15 +925,12 @@ fn collect_implementation(
     }
 
     let Some(usage) = total_usage(&result_dir) else {
-        state.status = "PAUSED_USAGE".into();
-        state.pause_reason = Some("implementation task produced no valid usage record".into());
-        return save_state(
+        return pause(
             loop_dir,
             state,
-            Some((
-                "PAUSED",
-                object(&[("reason", Value::from(state.pause_reason.clone()))]),
-            )),
+            "PAUSED_USAGE",
+            "implementation task produced no valid usage record",
+            None,
         );
     };
     state.tokens_used = state.tokens_used.saturating_add(usage);
@@ -1009,16 +1058,12 @@ fn collect_verification(
                 )),
             );
         }
-        state.status = "PAUSED_RECOVERY".into();
-        state.pause_reason = Some(format!("verification task failed with status {status}"));
-        state.recovery_status = Some("VERIFY_RUNNING".into());
-        return save_state(
+        return pause(
             loop_dir,
             state,
-            Some((
-                "PAUSED",
-                object(&[("reason", Value::from(state.pause_reason.clone()))]),
-            )),
+            "PAUSED_RECOVERY",
+            &format!("verification task failed with status {status}"),
+            Some("VERIFY_RUNNING"),
         );
     }
 
@@ -1031,16 +1076,12 @@ fn collect_verification(
     state.last_verification = Some(verification.clone());
     state.active_task = None;
     if !verification.harness_ok {
-        state.status = "PAUSED_RECOVERY".into();
-        state.pause_reason = Some("verification harness reported failure".into());
-        state.recovery_status = Some("VERIFY_RUNNING".into());
-        return save_state(
+        return pause(
             loop_dir,
             state,
-            Some((
-                "PAUSED",
-                object(&[("reason", Value::from(state.pause_reason.clone()))]),
-            )),
+            "PAUSED_RECOVERY",
+            "verification harness reported failure",
+            Some("VERIFY_RUNNING"),
         );
     }
 
@@ -1060,9 +1101,13 @@ fn collect_verification(
             );
         }
         if state.pause_requested {
-            state.status = "PAUSED_COCKPIT".into();
-            state.pause_reason = Some("cockpit pause requested".into());
-            return save_state(loop_dir, state, Some(("PAUSED", object(&[]))));
+            return pause(
+                loop_dir,
+                state,
+                "PAUSED_COCKPIT",
+                "cockpit pause requested",
+                None,
+            );
         }
         state.status = "READY".into();
         return save_state(loop_dir, state, Some(("CANDIDATE_REJECTED", object(&[]))));
@@ -1136,9 +1181,13 @@ fn collect_verification(
         return save_state(loop_dir, state, Some(("VERIFIED_CANDIDATE", object(&[]))));
     }
     if state.pause_requested {
-        state.status = "PAUSED_COCKPIT".into();
-        state.pause_reason = Some("cockpit pause requested".into());
-        save_state(loop_dir, state, Some(("PAUSED", object(&[]))))
+        pause(
+            loop_dir,
+            state,
+            "PAUSED_COCKPIT",
+            "cockpit pause requested",
+            None,
+        )
     } else if state.no_progress >= spec.budgets.max_no_progress {
         advance_route_or_pause(
             loop_dir,
@@ -1225,10 +1274,7 @@ fn process_loop(config: &Config, loop_dir: &Path) -> Result<()> {
 }
 
 fn create_loop(config: &Config, slug: &str) -> Result<()> {
-    if !Regex::new(r"^[a-z0-9][a-z0-9-]{0,40}$")
-        .unwrap()
-        .is_match(slug)
-    {
+    if !valid_slug(slug) {
         return Err("loop slug must match [a-z0-9][a-z0-9-]{0,40}".into());
     }
     let staging = config.loops.join("staging");
@@ -1371,11 +1417,12 @@ fn daemon(config: &Config) -> Result<()> {
             .collect();
         dirs.sort();
         for loop_dir in dirs {
-            let metadata = match fs::symlink_metadata(&loop_dir) {
-                Ok(value) if value.is_dir() && !value.file_type().is_symlink() => value,
-                _ => continue,
-            };
-            let _ = metadata;
+            let is_plain_dir = fs::symlink_metadata(&loop_dir)
+                .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+                .unwrap_or(false);
+            if !is_plain_dir {
+                continue;
+            }
             if let Err(error) = process_loop(config, &loop_dir)
                 && let Ok(_lock) = lock_loop(&loop_dir)
                 && let Ok(mut state) =

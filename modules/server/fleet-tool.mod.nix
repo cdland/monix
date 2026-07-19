@@ -32,7 +32,7 @@
     let
       inherit (lib.modules) mkIf;
       inherit (lib.options) mkOption;
-      inherit (lib.strings) concatMapStringsSep fileContents replaceStrings;
+      inherit (lib.strings) concatMapStringsSep fileContents hasSuffix replaceStrings;
       inherit (lib) types;
 
       cfg = config.agentFleet;
@@ -47,47 +47,30 @@
       # this exact derivation.
       fleetPath = "/run/current-system/sw/bin/fleet";
 
-      workerHealth = concatMapStringsSep "\n" (w: ''
-        if systemctl is-active --quiet microvm@${w.name}.service \
-          && [ -f /run/agents/ready/${w.name} ] \
-          && [ ! -L /run/agents/ready/${w.name} ]; then
-          warm=$((warm + 1))
-        fi
-        systemctl is-active --quiet agent-dispatch-${w.name}.service && drainers=$((drainers + 1)) || true
-      '') cfg.workers;
-
-      fleet = pkgs.writeShellApplication {
-        name = "fleet";
-        runtimeInputs = [
-          pkgs.coreutils
-          pkgs.findutils
-          pkgs.gnugrep
-          pkgs.gnutar
-          pkgs.gawk
-          pkgs.systemd
-          pkgs.zstd
-        ];
-        text =
-          replaceStrings
-            [
-              "@TASKS_DIR@"
-              "@TASK_CONTEXT_MAX_BYTES@"
-              "@TASK_TIMEOUT@"
-              "@OPERATOR@"
-              "@FLEET_PATH@"
-              "@WORKER_HEALTH@"
-              "@WORKER_COUNT@"
-            ]
-            [
-              tasksDir
-              (toString cfg.taskContextMaxBytes)
-              (toString cfg.taskTimeout)
-              op
-              fleetPath
-              workerHealth
-              (toString (lib.lists.length cfg.workers))
-            ]
-            (fileContents ./fleet-tool/fleet.sh.in);
+      # Deployment configuration is baked into the binary at build time
+      # (option_env!), the Rust equivalent of the @VAR@ substitution the bash
+      # predecessor used: caller environment must not repoint the queue or the
+      # helper binaries across the sudo boundary.
+      fleet = pkgs.rustPlatform.buildRustPackage {
+        pname = "fleet";
+        version = "0.1.0";
+        src = lib.sources.cleanSourceWith {
+          src = ./fleet-tool/fleet-cli;
+          filter = path: type: type != "directory" || !hasSuffix "/target" (toString path);
+        };
+        cargoLock.lockFile = ./fleet-tool/fleet-cli/Cargo.lock;
+        env = {
+          FLEET_TASKS_DIR = tasksDir;
+          FLEET_CONTEXT_MAX_BYTES = toString cfg.taskContextMaxBytes;
+          FLEET_TASK_TIMEOUT = toString cfg.taskTimeout;
+          FLEET_OPERATOR = op;
+          FLEET_SELF = fleetPath;
+          FLEET_WORKERS = concatMapStringsSep " " (w: w.name) cfg.workers;
+          FLEET_TAR = "${pkgs.gnutar}/bin/tar";
+          FLEET_ZSTD = "${pkgs.zstd}/bin/zstd";
+          FLEET_SYSTEMCTL = "${pkgs.systemd}/bin/systemctl";
+        };
+        meta.mainProgram = "fleet";
       };
 
       # ship-status — the combined ship dashboard, in nushell. Sections are

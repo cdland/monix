@@ -917,23 +917,23 @@ impl Supervisor {
             .to_string();
 
         if loop_mode != "standard" {
-            let patches = matching_files(&loop_dir.join("patches"), |name| {
-                !name.starts_with('.') && name.ends_with(".patch")
-            });
             // Symlinks or other non-regular entries hidden among the patches
             // are a wrapper-integrity failure, not something to skip.
+            let mut patches = Vec::new();
             if let Ok(entries) = fs::read_dir(loop_dir.join("patches")) {
                 for entry in entries.flatten() {
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
-                    if !name.starts_with('.')
-                        && name.ends_with(".patch")
-                        && !is_regular_nofollow(&entry.path())
-                    {
+                    if name.starts_with('.') || !name.ends_with(".patch") {
+                        continue;
+                    }
+                    if !is_regular_nofollow(&entry.path()) {
                         return Err(format!("unsafe loop patch entry: {name}"));
                     }
+                    patches.push(entry.path());
                 }
             }
+            patches.sort();
             for patch in &patches {
                 run_logged(git(&["apply", "--index", "--binary"]).arg(patch), log)?;
                 let name = patch
@@ -985,61 +985,45 @@ impl Supervisor {
         found
     }
 
+    // One credential file into the executor's private location: 0700 dir,
+    // 0400 file, owned by that executor, nothing broader.
+    fn install_secret(&self, directory: &Path, file: &str, owner: &str, contents: &[u8]) -> Result<()> {
+        ensure_dir(directory, 0o700, Some(owner))?;
+        let destination = directory.join(file);
+        write_replace(&destination, contents, 0o400)?;
+        chown_name(&destination, owner)
+    }
+
     fn install_credential(&self, rule: CredentialRule) -> Result<()> {
         let CredentialRule::Exactly(name) = rule else {
             return Ok(());
         };
-        let source = self.config.creds_dir.join(name);
+        let secret = read_bounded(&self.config.creds_dir.join(name), CREDENTIAL_MAX_BYTES)?;
+        let env_line = |variable: &str| {
+            format!(
+                "export {variable}={}\n",
+                shell_quote(trim_trailing_newlines(&secret))
+            )
+        };
         match name {
-            "claude-token" => {
-                let token = read_bounded(&source, CREDENTIAL_MAX_BYTES)?;
-                ensure_dir(
-                    Path::new("/run/agent-claude"),
-                    0o700,
-                    Some("agent-claude:users"),
-                )?;
-                let env = Path::new("/run/agent-claude/env");
-                write_replace(
-                    env,
-                    format!(
-                        "export CLAUDE_CODE_OAUTH_TOKEN={}\n",
-                        shell_quote(trim_trailing_newlines(&token))
-                    )
-                    .as_bytes(),
-                    0o400,
-                )?;
-                chown_name(env, "agent-claude:users")
-            }
-            "codex-auth.json" => {
-                let auth = read_bounded(&source, CREDENTIAL_MAX_BYTES)?;
-                ensure_dir(
-                    Path::new("/home/agent-codex/.codex"),
-                    0o700,
-                    Some("agent-codex:users"),
-                )?;
-                let destination = Path::new("/home/agent-codex/.codex/auth.json");
-                write_replace(destination, auth.as_bytes(), 0o400)?;
-                chown_name(destination, "agent-codex:users")
-            }
-            "openrouter-key" => {
-                let key = read_bounded(&source, CREDENTIAL_MAX_BYTES)?;
-                ensure_dir(
-                    Path::new("/run/agent-opencode"),
-                    0o700,
-                    Some("agent-opencode:users"),
-                )?;
-                let env = Path::new("/run/agent-opencode/env");
-                write_replace(
-                    env,
-                    format!(
-                        "export OPENROUTER_API_KEY={}\n",
-                        shell_quote(trim_trailing_newlines(&key))
-                    )
-                    .as_bytes(),
-                    0o400,
-                )?;
-                chown_name(env, "agent-opencode:users")
-            }
+            "claude-token" => self.install_secret(
+                Path::new("/run/agent-claude"),
+                "env",
+                "agent-claude:users",
+                env_line("CLAUDE_CODE_OAUTH_TOKEN").as_bytes(),
+            ),
+            "codex-auth.json" => self.install_secret(
+                Path::new("/home/agent-codex/.codex"),
+                "auth.json",
+                "agent-codex:users",
+                secret.as_bytes(),
+            ),
+            "openrouter-key" => self.install_secret(
+                Path::new("/run/agent-opencode"),
+                "env",
+                "agent-opencode:users",
+                env_line("OPENROUTER_API_KEY").as_bytes(),
+            ),
             other => Err(format!("unknown credential name: {other}")),
         }
     }
