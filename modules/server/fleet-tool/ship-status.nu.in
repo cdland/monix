@@ -82,17 +82,6 @@ def main [] {
     row $"       (esc attr_dimmed)generation(esc reset) ($gen)"
   }
 
-  rule "├" "┤" "REACTOR // RAM BY DOMAIN" $bw "cyan"
-  for sl in [cockpit.slice agents.slice inference.slice services.slice] {
-    let cur = (^systemctl show $sl -p MemoryCurrent --value | str trim)
-    let pk = (^systemctl show $sl -p MemoryPeak --value | str trim)
-    if $narrow {
-      row $"($sl | str replace ".slice" "" | fill -w 10) (bytes $cur) / (bytes $pk) peak"
-    } else {
-      row $"($sl | fill -w 18) current ((bytes $cur) | fill -w 9 -a right)   peak ((bytes $pk) | fill -w 9 -a right)"
-    }
-  }
-
   rule "├" "┤" "HULL" $bw "cyan"
   # Hottest reading per hwmon chip; sysfs is world-readable.
   let temps = (try {
@@ -183,7 +172,7 @@ def main [] {
     row $"server (svc minecraft-server-main.service) · players ($players)"
     row $"($ver) · ping ($ping) · (bytes $mcmem)"
   } else {
-    row $"server (svc minecraft-server-main.service | fill -w 14) players ($players | fill -w 7) version ($ver | fill -w 14) ping ($ping | fill -w 10) memory (bytes $mcmem)"
+    row $"server (svc minecraft-server-main.service)  players ($players)  ($ver)  ping ($ping)  mem (bytes $mcmem)"
   }
 
   rule "╰" "╯" "" $bw "cyan_bold"
