@@ -177,6 +177,15 @@
             # pattern; the set is fully reproducible from the hashes above.
             symlinks.mods = pkgs.linkFarmFromDrvs "mods" (lib.attrsets.attrValues mods);
 
+            # Chunksmith 3.x auto-enables its LOD store on dedicated servers:
+            # ~16% slower pregen, ~5.8KB/chunk of disk, and a second listener
+            # on game-port+1 — all serving the Chunksmith-Client companion mod,
+            # which our stock-vanilla players don't run. Off. (files, not
+            # symlinks: the mod expects a writable config it can rewrite.)
+            files."config/chunksmith.json" = pkgs.writeText "chunksmith.json" (
+              builtins.toJSON { lodEnabled = false; }
+            );
+
             # SERVER PROPERTIES — small-server defaults. online-mode true means
             # Mojang-authenticated accounts only (and is why the egress fence has
             # to permit the public Mojang session servers). No whitelist.
@@ -187,6 +196,10 @@
               # Captain-chosen seed for the 26.2 world remake (2026-07-19).
               # Only consulted at world creation; inert for an existing world.
               level-seed = "1133044835122437667";
+              # Never pause when empty: a paused server ignores console input
+              # (queued commands sit in the stdin pipe) and freezes Chunksmith
+              # pregeneration the moment the last player leaves.
+              pause-when-empty-seconds = -1;
               online-mode = true;
               white-list = false;
               # Generous sightlines: fw0 has huge headroom for 3-5 players, and
