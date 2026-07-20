@@ -128,6 +128,7 @@ def home_db(path=DB_PATH, cal=True):
             id INTEGER PRIMARY KEY,
             list_name TEXT NOT NULL,
             name TEXT NOT NULL,
+            seq INTEGER NOT NULL DEFAULT 0, -- per-list display number, stable
             due TEXT NOT NULL DEFAULT '',       -- ISO yyyy-mm-dd, '' = undated
             assignee TEXT NOT NULL DEFAULT '',  -- '' = whole household
             section TEXT NOT NULL DEFAULT '',   -- a labelled group within a list
@@ -184,6 +185,8 @@ def home_db(path=DB_PATH, cal=True):
     for col in ("due", "assignee", "section", "done_by"):
         if col not in item_cols:
             db.execute(f"ALTER TABLE item ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+    if "seq" not in item_cols:
+        db.execute("ALTER TABLE item ADD COLUMN seq INTEGER NOT NULL DEFAULT 0")
     db.commit()
     if meta_get(db, "merged_v2") != "1":
         for t in db.execute("SELECT * FROM task").fetchall():
@@ -201,6 +204,13 @@ def home_db(path=DB_PATH, cal=True):
                           f"☐ {t['title']}" + (f" — {t['assignee']}" if t["assignee"] else ""),
                           t["due"], t["created_by"])
         meta_set(db, "merged_v2", "1")
+    db.commit()
+    # Per-list display numbers: give any unnumbered row (fresh column, or a
+    # row from the merge) a stable 1..N within its list, ordered by id. Only
+    # touches seq=0 rows, so it is a one-time backfill that then no-ops.
+    db.execute("UPDATE item SET seq = (SELECT COUNT(*) FROM item i2 "
+               "WHERE i2.list_name = item.list_name AND i2.id <= item.id) "
+               "WHERE seq = 0")
     db.commit()
     return db
 
@@ -366,7 +376,9 @@ def fmt_who(r):
 
 
 def fmt_item(r):
-    return f"#{r['id']} {r['name']}{fmt_who(r)}{fmt_due(r['due'])}"
+    # Per-list number, clean list style ("1. milk"). Used only in single-list
+    # views; cross-list summaries render names without numbers.
+    return f"{r['seq']}. {r['name']}{fmt_who(r)}{fmt_due(r['due'])}"
 
 
 def calendar_events(day_from, day_to):
@@ -467,20 +479,20 @@ HOME_SCHEMA = {
 def home_parse(db, sender_name, text):
     now_dt = datetime.now(TZ)
     now = now_dt.date()
-    # Show the model the open lists grouped, so it can reuse an existing list
-    # name (routing) and reference items by #id.
+    # Show the model the open lists grouped, each item as its per-list number
+    # (the same number the user sees), so it can route and reference items.
     lists = {}
     for r in open_items(db):
         lists.setdefault(r["list_name"], []).append(r)
     if lists:
         listing = "\n".join(
-            f"{ln}:\n" + "\n".join(f"  #{r['id']} {r['name']}{fmt_who(r)}{fmt_due(r['due'])}"
+            f"{ln}:\n" + "\n".join(f"  {r['seq']}. {r['name']}{fmt_who(r)}{fmt_due(r['due'])}"
                                    for r in rows)
             for ln, rows in lists.items())
     else:
         listing = "(no lists yet)"
     list_names = ", ".join(lists.keys()) or "(none yet)"
-    deleted = "\n".join(f"#{r['id']} [{r['list_name']}] {r['name']}" for r in db.execute(
+    deleted = "\n".join(f"[{r['list_name']}] {r['seq']}. {r['name']}" for r in db.execute(
         "SELECT * FROM item WHERE deleted=1 ORDER BY id DESC LIMIT 5"))
     reminders = "\n".join(fmt_reminder(r) for r in pending_reminders(db)) or "(none)"
     chat_desc = ("family household-organizer chat" if db.cal else
@@ -511,10 +523,11 @@ to-dos, packing…; items may carry a due date and a person), the CALENDAR (time
 appointments), and REMINDERS (pings at a moment). "to-dos" is the catch-all list
 for things to do; "chores" is its own list.
 
-Open lists (name, then its items as #id):
+Open lists (each item shown as its per-list number — numbers restart per list,
+so "2" in shopping is a different item than "2" in chores):
 {listing}
 Existing list names: {list_names}
-Recently removed items (restorable):
+Recently removed items (restorable), shown as [list] number name:
 {deleted or "(none)"}
 Pending reminders (id time text):
 {reminders}
@@ -538,12 +551,18 @@ Rules:
   list and none was named, DO NOT GUESS — use intent ask (see below).
 - Starting an empty list ("make a packing list") => item_add, that list_name,
   items [].
-- Checking an item off ("got the milk", "did the plumber thing", "done #4")
-  => item_done with item_id from the lists above.
-- Rewording/redating/reassigning/moving ("push #3 to friday", "give #3 to gab",
-  "rename #3 to X") => item_edit with item_id and only the changed
-  new_name/new_due/new_assignee. Removing one => item_remove + item_id; bringing
-  one back ("restore #5") => item_restore + item_id.
+- REFERENCING an item: numbers are PER-LIST, so to act on one you MUST give BOTH
+  its list_name AND item_id = its number within that list (from the lists above).
+  Find it by name ("got the milk" => milk's list + its number) or by "N on/in
+  <list>" ("done 2 on shopping" => list_name "shopping", item_id 2). If only a
+  bare number is given and more than one list has it, DO NOT guess — use ask.
+- Checking an item off ("got the milk", "did the plumber thing", "done 2 on
+  shopping") => item_done with list_name + item_id.
+- Rewording/redating/reassigning/moving ("push the dentist to friday", "give the
+  milk to gab") => item_edit with list_name + item_id and only the changed
+  new_name/new_due/new_assignee. Removing one => item_remove with list_name +
+  item_id; bringing one back ("restore the milk") => item_restore with list_name
+  + item_id (its list + number are in the removed-items list above).
 - MANAGING lists: "show the shopping list" / "what's on chores" => list_show
   with list_name. "what lists do we have" / "show all my lists" => lists_show.
   "rename hardware to garage" => list_rename with list_name + new_list_name.
@@ -722,9 +741,20 @@ def do_remind_show(db):
                                  or "(none)")
 
 
-def get_item(db, act, deleted=0):
-    return db.execute("SELECT * FROM item WHERE id=? AND deleted=?",
-                      (act.get("item_id"), deleted)).fetchone()
+def get_item(db, act):
+    """Resolve an item the way people refer to it: its list plus its per-list
+    number. Returns the row regardless of done/deleted state (seq is unique
+    within a list, including retired rows), so callers check state themselves."""
+    ln = (act.get("list_name") or "").strip().lower()
+    seq = act.get("item_id") or 0
+    if not ln or not seq:
+        return None
+    return db.execute("SELECT * FROM item WHERE list_name=? AND seq=?",
+                      (ln, seq)).fetchone()
+
+
+NEED_REF = ("Which item? Say its list and number (e.g. 'done 2 on shopping') "
+            "or just name it ('got the milk').")
 
 
 def do_item_add(db, act, sender):
@@ -738,10 +768,14 @@ def do_item_add(db, act, sender):
         # just teach the phrasing.
         return f"👍 '{ln}' it is — put things on it like 'add milk to {ln}'."
     now_ts = int(time.time())
+    # Continue the list's numbering from its high-water mark (retired rows
+    # counted) so per-list numbers stay stable and are never reused.
+    base = db.execute("SELECT COALESCE(MAX(seq),0) m FROM item WHERE list_name=?",
+                      (ln,)).fetchone()["m"]
     ids = []
-    for n in names:
-        db.execute("INSERT INTO item(list_name,name,due,assignee,section,added_by,added_ts)"
-                   " VALUES(?,?,?,?,?,?,?)", (ln, n, due, who, section, sender, now_ts))
+    for i, n in enumerate(names, 1):
+        db.execute("INSERT INTO item(list_name,name,seq,due,assignee,section,added_by,added_ts)"
+                   " VALUES(?,?,?,?,?,?,?,?)", (ln, n, base + i, due, who, section, sender, now_ts))
         ids.append(db.execute("SELECT last_insert_rowid() r").fetchone()["r"])
     db.commit()
     if due:
@@ -755,8 +789,8 @@ def do_item_add(db, act, sender):
 
 def do_item_done(db, act, sender):
     r = get_item(db, act)
-    if not r:
-        return "Couldn't tell which item — use its #id."
+    if not r or r["deleted"]:
+        return NEED_REF
     db.execute("UPDATE item SET done_ts=?, done_by=? WHERE id=?",
                (int(time.time()), sender, r["id"]))
     db.commit()
@@ -767,8 +801,8 @@ def do_item_done(db, act, sender):
 
 def do_item_edit(db, act):
     r = get_item(db, act)
-    if not r:
-        return "Couldn't tell which item — use its #id."
+    if not r or r["deleted"]:
+        return NEED_REF
     changes, params = [], []
     if act.get("new_name"):
         changes.append("name=?"); params.append(act["new_name"].strip()[:80])
@@ -788,19 +822,19 @@ def do_item_edit(db, act):
 
 def do_item_remove(db, act):
     r = get_item(db, act)
-    if not r:
-        return "Couldn't tell which item — use its #id."
+    if not r or r["deleted"]:
+        return NEED_REF
     db.execute("UPDATE item SET deleted=1 WHERE id=?", (r["id"],))
     db.commit()
     if r["due"]:
         sync_item_event(db, r["id"])
-    return f"🗑 {r['name']} off {r['list_name']} (say 'restore #{r['id']}' to undo)"
+    return f"🗑 removed {r['name']} from {r['list_name']} (say 'restore the {r['name']}' to undo)"
 
 
 def do_item_restore(db, act):
-    r = get_item(db, act, deleted=1)
-    if not r:
-        return "Nothing removed under that #id."
+    r = get_item(db, act)
+    if not r or not r["deleted"]:
+        return "Nothing removed by that name/number to bring back."
     db.execute("UPDATE item SET deleted=0 WHERE id=?", (r["id"],))
     db.commit()
     if r["due"]:
@@ -821,7 +855,7 @@ def do_list_show(db, act):
             if r["section"]:
                 lines.append(f"  [{r['section']}]")
             last_sec = r["section"]
-        lines.append(f"  • #{r['id']} {r['name']}{fmt_who(r)}{fmt_due(r['due'])}")
+        lines.append(f"  {fmt_item(r)}")
     return "\n".join(lines)
 
 
@@ -841,9 +875,15 @@ def do_list_rename(db, act):
         return "Rename which list to what? ('rename hardware to garage')"
     n = db.execute("UPDATE item SET list_name=? WHERE list_name=? AND deleted=0",
                    (new, ln)).rowcount
-    db.commit()
     if not n:
+        db.commit()
         return f"No open list called '{ln}'."
+    # Renaming into an existing list could collide numbers; re-number the
+    # target contiguously by id so each # stays unique within the list.
+    for i, row in enumerate(db.execute(
+            "SELECT id FROM item WHERE list_name=? ORDER BY id", (new,)).fetchall(), 1):
+        db.execute("UPDATE item SET seq=? WHERE id=?", (i, row["id"]))
+    db.commit()
     return f"✏️ '{ln}' → '{new}' ({n} item{'s' if n != 1 else ''})"
 
 
@@ -865,7 +905,7 @@ def do_todos_show(db, act):
             "SELECT * FROM item WHERE list_name='to-dos' AND deleted=0 "
             "AND done_ts IS NOT NULL ORDER BY done_ts DESC LIMIT 10").fetchall()
         return "Recently done:\n" + ("\n".join(
-            f"✔ #{r['id']} {r['name']} ({r['done_by']})" for r in rows) or "(nothing yet)")
+            f"✔ {r['seq']}. {r['name']} ({r['done_by']})" for r in rows) or "(nothing yet)")
     rows = open_items(db, "to-dos")
     who = valid_assignee(act.get("assignee"))
     if who:
@@ -884,7 +924,7 @@ def do_todos_show(db, act):
         head = "This week's to-dos:"
     else:
         head = "To-dos" + (f" — {who}" if who else "") + ":"
-    return head + "\n" + ("\n".join("• " + fmt_item(r) for r in rows) or "(nothing!)")
+    return head + "\n" + ("\n".join(fmt_item(r) for r in rows) or "(nothing!)")
 
 
 def do_log_add(db, act, sender):
@@ -918,7 +958,7 @@ def week_section(db, start, title="📅 Week ahead:"):
         lines += ["  " + s for s in by_day[d]]
     if todos:
         lines.append("To-dos due:")
-        lines += ["  • " + fmt_item(r) for r in todos]
+        lines += [f"  • {r['name']}{fmt_who(r)}{fmt_due(r['due'])}" for r in todos]
     return "\n".join(lines)
 
 
@@ -930,10 +970,10 @@ def morning_post(db):
     due_today = [r for r in dated if r["due"] == now.isoformat()]
     if overdue:
         lines.append("Overdue:")
-        lines += [f"  • #{r['id']} {r['name']}{fmt_who(r)}{fmt_due(r['due'])}" for r in overdue]
+        lines += [f"  • {r['name']}{fmt_who(r)}{fmt_due(r['due'])}" for r in overdue]
     if due_today:
         lines.append("Today:")
-        lines += [f"  • #{r['id']} {r['name']}{fmt_who(r)}" for r in due_today]
+        lines += [f"  • {r['name']}{fmt_who(r)}" for r in due_today]
     rems = [r for r in pending_reminders(db) if r["at"][:10] == now.isoformat()]
     if rems:
         lines.append("Reminders today:")
@@ -966,13 +1006,13 @@ def evening_post(db):
     missed = [r for r in dated_open(db) if r["due"] <= now.isoformat()]
     if missed:
         lines.append("Last call:")
-        lines += [f"  • #{r['id']} {r['name']}{fmt_who(r)}{fmt_due(r['due'])}" for r in missed]
+        lines += [f"  • {r['name']}{fmt_who(r)}{fmt_due(r['due'])}" for r in missed]
     tomorrow = now + timedelta(days=1)
     due_tmrw = [r for r in dated_open(db) if r["due"] == tomorrow.isoformat()]
     events, _ = calendar_events(tomorrow, tomorrow)
     if due_tmrw or events:
         lines.append("Tomorrow:")
-        lines += [f"  • #{r['id']} {r['name']}{fmt_who(r)}" for r in due_tmrw]
+        lines += [f"  • {r['name']}{fmt_who(r)}" for r in due_tmrw]
         lines += ["  ◦ " + fmt_event(ev) for ev in events]
     if len(lines) == 1:
         lines.append("Quiet day — nothing logged, nothing due.")
@@ -1091,7 +1131,7 @@ calendar, and reminders — plus a daily log. Examples:
 • add milk and eggs to shopping / got the milk / show the shopping list
 • make a packing list / what lists do we have? / rename hardware to garage
 • we need to renew the registration by friday / I need dylan to call the plumber thursday
-• what do I still have to do? / what's on gab's plate this week? / done #4
+• what do I still have to do? / what's on gab's plate this week? / got the milk / done 2 on shopping
 • remind me thursday at 9 to defrost the chicken / what reminders are set?
 • put the dentist on the calendar tuesday at 3 — goes straight to Migadu
 • add to log: Julia had her baby today — I write the day's log each night
@@ -1102,7 +1142,7 @@ If I'm not sure which list something belongs on, I'll ask.
 SCRATCH_HELP = """Your scratchpad — notes, reminders, to-dos, quick lists. Examples:
 • note: the gate code is 4482 / show the notes list
 • remind me at 5 to leave / remind me thursday at 9 to call back / what reminders are set?
-• renew the passport by friday / what do I still have to do? / done #3
+• renew the passport by friday / what do I still have to do? / done 3 on to-dos
 • add batteries to hardware / what lists do we have?
 Summaries show the family calendar, but it's read-only from here —
 add events in the Household room. No scheduled posts; ask when you
