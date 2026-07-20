@@ -89,6 +89,10 @@
   ];
   remy.scratchpad.users = [ "@dylan:chat.su.is" ];
   remy.calendar.credentialsFile = config.secrets.remy-caldav-json.path;
+  # Mirror the daily log into the Syncthing/Obsidian vault (max:syncthing tree).
+  remy.famlog.path = "/home/max/crate/sync/notes/famlog.md";
+  remy.famlog.owner = "max";
+  remy.famlog.group = "syncthing";
 
   # News digests post twice daily to the captain's private News room.
   newsbot.enable = true;

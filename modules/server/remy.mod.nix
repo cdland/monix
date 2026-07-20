@@ -277,6 +277,39 @@
           description = "Local HH:MM for the evening report post.";
         };
 
+        logTime = mkOption {
+          type = types.str;
+          default = "23:50";
+          description = ''
+            Local HH:MM at which the bot composes and appends the day's entry
+            to the family log (/var/lib/remy/log.md).
+          '';
+        };
+
+        famlog = {
+          path = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            example = "/home/user/vault/notes/famlog.md";
+            description = ''
+              If set, a path unit mirrors the daily log here whenever it
+              changes — e.g. into an Obsidian vault. The bot itself is fenced
+              out of /home, so a separate root oneshot does the copy. null =
+              no mirror (the log still lives at /var/lib/remy/log.md).
+            '';
+          };
+          owner = mkOption {
+            type = types.str;
+            default = "root";
+            description = "Owner of the mirrored file (the vault's user).";
+          };
+          group = mkOption {
+            type = types.str;
+            default = "root";
+            description = "Group of the mirrored file.";
+          };
+        };
+
         calendar.credentialsFile = mkOption {
           type = types.nullOr types.path;
           default = null;
@@ -384,6 +417,7 @@
             BOT_CALENDAR_JSON = "/var/lib/remy/calendar.json";
             BOT_MORNING = cfg.morningTime;
             BOT_EVENING = cfg.eveningTime;
+            BOT_LOG_TIME = cfg.logTime;
             BOT_TZ = config.time.timeZone;
             # matplotlib wants a writable config dir; PrivateTmp provides one.
             MPLCONFIGDIR = "/tmp/mpl";
@@ -434,6 +468,36 @@
         systemd.paths.remy-calendar-sync = mkIf (cfg.calendar.credentialsFile != null) {
           wantedBy = [ "multi-user.target" ];
           pathConfig.PathChanged = "/var/lib/remy/outbox.flag";
+        };
+
+        # Mirror the family log into a vault path (Obsidian). The bot writes
+        # /var/lib/remy/log.md (0700 dir, remy-only) and touches log.flag; this
+        # root oneshot — the only piece that may reach /home — copies it out,
+        # owned by the vault's user. Runs on flag change, so it tracks the
+        # nightly write within seconds.
+        systemd.services.remy-famlog = mkIf (cfg.famlog.path != null) {
+          description = "mirror remy's daily log into the vault";
+          serviceConfig = {
+            Type = "oneshot";
+            ExecStart = getExe (pkgs.writeShellApplication {
+              name = "remy-famlog";
+              runtimeInputs = [ pkgs.coreutils ];
+              text = ''
+                src=/var/lib/remy/log.md
+                [ -f "$src" ] || exit 0
+                install -D -o ${cfg.famlog.owner} -g ${cfg.famlog.group} -m 0644 \
+                  "$src" ${lib.escapeShellArg cfg.famlog.path}
+              '';
+            });
+            ProtectSystem = "strict";
+            ReadWritePaths = [ (builtins.dirOf cfg.famlog.path) ];
+            ReadOnlyPaths = [ "/var/lib/remy" ];
+          };
+        };
+
+        systemd.paths.remy-famlog = mkIf (cfg.famlog.path != null) {
+          wantedBy = [ "multi-user.target" ];
+          pathConfig.PathChanged = "/var/lib/remy/log.flag";
         };
       };
     };

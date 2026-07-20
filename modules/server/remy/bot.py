@@ -73,6 +73,12 @@ MORNING = os.environ.get("BOT_MORNING", "07:00")
 EVENING = os.environ.get("BOT_EVENING", "19:00")
 BUDGET_REMIND_HOUR = int(os.environ.get("BOT_BUDGET_REMIND_HOUR", "18"))
 BUDGET_STALE_DAYS = int(os.environ.get("BOT_BUDGET_STALE_DAYS", "3"))
+# The family log: an append-only markdown journal the bot writes once a day.
+# It lives in the state dir (a separate unit mirrors it into the Obsidian
+# vault — the fenced bot can't reach /home). LOG_FLAG pokes that mirror.
+LOG_PATH = os.environ.get("BOT_LOG", os.path.join(os.path.dirname(DB_PATH), "log.md"))
+LOG_FLAG = os.path.join(os.path.dirname(DB_PATH), "log.flag")
+LOG_TIME = os.environ.get("BOT_LOG_TIME", "23:50")
 
 DEFAULT_CATEGORIES = [
     "groceries", "dining", "transport", "household", "health",
@@ -122,9 +128,21 @@ def home_db(path=DB_PATH, cal=True):
             id INTEGER PRIMARY KEY,
             list_name TEXT NOT NULL,
             name TEXT NOT NULL,
+            due TEXT NOT NULL DEFAULT '',       -- ISO yyyy-mm-dd, '' = undated
+            assignee TEXT NOT NULL DEFAULT '',  -- '' = whole household
+            section TEXT NOT NULL DEFAULT '',   -- a labelled group within a list
             added_by TEXT NOT NULL,
             added_ts INTEGER NOT NULL,
             done_ts INTEGER,                -- NULL = still needed
+            done_by TEXT NOT NULL DEFAULT '',
+            deleted INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS log_note(
+            id INTEGER PRIMARY KEY,
+            day TEXT NOT NULL,              -- yyyy-mm-dd this note belongs to
+            text TEXT NOT NULL,
+            added_by TEXT NOT NULL,
+            added_ts INTEGER NOT NULL,
             deleted INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS cal_outbox(
@@ -158,6 +176,31 @@ def home_db(path=DB_PATH, cal=True):
     if "op" not in outbox_cols:
         db.execute("ALTER TABLE cal_outbox ADD COLUMN op TEXT NOT NULL DEFAULT 'create'")
         db.execute("ALTER TABLE cal_outbox ADD COLUMN uid TEXT NOT NULL DEFAULT ''")
+    # 2026-07-20 unified list model: items gained due/assignee/section/done_by,
+    # and the separate `task` table folds into a plain list called "to-dos"
+    # (a to-do is just a list item that may carry a due date). The old table
+    # is kept for history/rollback but no longer read.
+    item_cols = [r[1] for r in db.execute("PRAGMA table_info(item)")]
+    for col in ("due", "assignee", "section", "done_by"):
+        if col not in item_cols:
+            db.execute(f"ALTER TABLE item ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+    db.commit()
+    if meta_get(db, "merged_v2") != "1":
+        for t in db.execute("SELECT * FROM task").fetchall():
+            db.execute(
+                "INSERT INTO item(list_name,name,due,assignee,section,added_by,"
+                "added_ts,done_ts,done_by,deleted) VALUES('to-dos',?,?,?,'',?,?,?,?,?)",
+                (t["title"], t["due"], t["assignee"], t["created_by"], t["created_ts"],
+                 t["done_ts"], t["done_by"], t["deleted"]))
+            new_id = db.execute("SELECT last_insert_rowid() r").fetchone()["r"]
+            # An open dated to-do already has a calendar mirror under its old
+            # task uid; move it to the item uid so future edits stay in sync.
+            if db.cal and not t["deleted"] and t["done_ts"] is None and t["due"]:
+                queue_cal(db, "delete", task_uid(t["id"]))
+                queue_cal(db, "create", item_uid(new_id),
+                          f"☐ {t['title']}" + (f" — {t['assignee']}" if t["assignee"] else ""),
+                          t["due"], t["created_by"])
+        meta_set(db, "merged_v2", "1")
     db.commit()
     return db
 
@@ -258,19 +301,44 @@ def llm_call(system, text, schema, max_tokens=800):
     return json.loads(m.group(0) if m else content)
 
 
+def llm_text(system, text, max_tokens=700):
+    """Free-form completion (no JSON schema) — used only to compose the daily
+    log's prose. A little warmth is welcome here, so temperature is higher
+    than the classifier's; callers must tolerate failure (the log falls back
+    to a deterministic scaffold)."""
+    body = {
+        "model": LLM_MODEL,
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": text}],
+        "chat_template_kwargs": {"enable_thinking": False},
+        "temperature": 0.3,
+        "max_tokens": max_tokens,
+    }
+    resp = requests.post(LLM_URL, json=body, timeout=180)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
 # ================================================================ household
 # Tasks with due dates + named lists, and the scheduled day posts.
 
-def open_tasks(db):
-    return db.execute(
-        "SELECT * FROM task WHERE deleted=0 AND done_ts IS NULL "
-        "ORDER BY CASE WHEN due='' THEN 1 ELSE 0 END, due, id").fetchall()
+def open_items(db, list_name=None):
+    """Open (undone, undeleted) items, optionally in one list. Dated items
+    sort before undated within a list; sections group together."""
+    q = "SELECT * FROM item WHERE deleted=0 AND done_ts IS NULL"
+    args = ()
+    if list_name is not None:
+        q += " AND list_name=?"
+        args = (list_name,)
+    q += " ORDER BY list_name, section, CASE WHEN due='' THEN 1 ELSE 0 END, due, id"
+    return db.execute(q, args).fetchall()
 
 
-def open_items(db):
+def dated_open(db):
+    """Every open dated item, across all lists — the day's real commitments."""
     return db.execute(
-        "SELECT * FROM item WHERE deleted=0 AND done_ts IS NULL "
-        "ORDER BY list_name, id").fetchall()
+        "SELECT * FROM item WHERE deleted=0 AND done_ts IS NULL AND due!='' "
+        "ORDER BY due, id").fetchall()
 
 
 def fmt_due(due):
@@ -297,8 +365,8 @@ def fmt_who(r):
     return f" — {r['assignee']}" if r["assignee"] else ""
 
 
-def fmt_task(r):
-    return f"#{r['id']} {r['title']}{fmt_who(r)}{fmt_due(r['due'])}"
+def fmt_item(r):
+    return f"#{r['id']} {r['name']}{fmt_who(r)}{fmt_due(r['due'])}"
 
 
 def calendar_events(day_from, day_to):
@@ -318,7 +386,8 @@ def calendar_events(day_from, day_to):
         # Task/reminder mirror-events exist for the phone apps; the posts
         # already render those as tasks and reminders — don't echo them.
         uid = ev.get("uid", "")
-        if uid.startswith("remy-task-") or uid.startswith("remy-rem-"):
+        if (uid.startswith("remy-task-") or uid.startswith("remy-rem-")
+                or uid.startswith("remy-item-")):
             continue
         try:
             d = date.fromisoformat(ev["start"][:10])
@@ -352,35 +421,36 @@ HOME_ACTION = {
     "type": "object",
     "properties": {
         "intent": {"type": "string",
-                   "enum": ["task_add", "task_done", "task_edit", "task_snooze",
-                            "task_delete", "task_restore", "tasks_show",
+                   "enum": ["item_add", "item_done", "item_edit", "item_remove",
+                            "item_restore", "list_show", "lists_show",
+                            "list_rename", "list_clear", "todos_show",
                             "remind_add", "remind_cancel", "remind_show",
-                            "cal_add",
-                            "item_add", "item_done", "item_remove", "list_show",
-                            "list_clear", "post_now", "help", "other"]},
-        "title": {"type": "string"},
+                            "cal_add", "log_add", "post_now", "help", "ask",
+                            "other"]},
+        "items": {"type": "array", "items": {"type": "string"}},
+        "list_name": {"type": "string"},
+        "new_list_name": {"type": "string"},
+        "section": {"type": "string"},
         "due": {"type": "string"},
         "at": {"type": "string"},
         "rem_id": {"type": "integer"},
         "assignee": {"type": "string"},
-        "task_id": {"type": "integer"},
-        "new_title": {"type": "string"},
+        "item_id": {"type": "integer"},
+        "new_name": {"type": "string"},
         "new_due": {"type": "string"},
         "new_assignee": {"type": "string"},
         "scope": {"type": "string",
                   "enum": ["today", "week", "all", "overdue", "done", ""]},
-        "list_name": {"type": "string"},
-        "items": {"type": "array", "items": {"type": "string"}},
-        "item_id": {"type": "integer"},
         "kind": {"type": "string", "enum": ["morning", "evening", "week", ""]},
+        "text": {"type": "string"},
         "reply": {"type": "string"},
     },
     # Every field required: with a grammar-constrained lazy model, optional
     # fields simply never get emitted (budgetbot live finding). Unused
     # fields carry "" / 0 / [].
-    "required": ["intent", "title", "due", "at", "rem_id", "assignee",
-                 "task_id", "new_title", "new_due", "new_assignee", "scope",
-                 "list_name", "items", "item_id", "kind", "reply"],
+    "required": ["intent", "items", "list_name", "new_list_name", "section",
+                 "due", "at", "rem_id", "assignee", "item_id", "new_name",
+                 "new_due", "new_assignee", "scope", "kind", "text", "reply"],
 }
 
 # One message can carry several actions ("by EOD we need X, and by friday
@@ -397,98 +467,114 @@ HOME_SCHEMA = {
 def home_parse(db, sender_name, text):
     now_dt = datetime.now(TZ)
     now = now_dt.date()
-    tasks = "\n".join(fmt_task(r) for r in open_tasks(db)) or "(none)"
-    deleted = "\n".join(fmt_task(r) for r in db.execute(
-        "SELECT * FROM task WHERE deleted=1 ORDER BY id DESC LIMIT 5"))
-    items = "\n".join(f"#{r['id']} [{r['list_name']}] {r['name']}"
-                      for r in open_items(db)) or "(none)"
+    # Show the model the open lists grouped, so it can reuse an existing list
+    # name (routing) and reference items by #id.
+    lists = {}
+    for r in open_items(db):
+        lists.setdefault(r["list_name"], []).append(r)
+    if lists:
+        listing = "\n".join(
+            f"{ln}:\n" + "\n".join(f"  #{r['id']} {r['name']}{fmt_who(r)}{fmt_due(r['due'])}"
+                                   for r in rows)
+            for ln, rows in lists.items())
+    else:
+        listing = "(no lists yet)"
+    list_names = ", ".join(lists.keys()) or "(none yet)"
+    deleted = "\n".join(f"#{r['id']} [{r['list_name']}] {r['name']}" for r in db.execute(
+        "SELECT * FROM item WHERE deleted=1 ORDER BY id DESC LIMIT 5"))
     reminders = "\n".join(fmt_reminder(r) for r in pending_reminders(db)) or "(none)"
     chat_desc = ("family household-organizer chat" if db.cal else
                  "personal scratchpad chat (one person and the bot: quick "
-                 "notes, reminders, tasks, lists)")
-    cal_rule = """- An APPOINTMENT/EVENT to go on the family calendar ("put the dentist on
-  the calendar tuesday at 3", "add gab's recital to the calendar friday",
-  "we have dinner with the smiths saturday 7pm") => cal_add with title and
-  at ('yyyy-mm-dd HH:MM', or just 'yyyy-mm-dd' for an all-day event).
-  Calendar = something happening; task = something to do; reminder = a ping.""" if db.cal else """- The calendar is READ-ONLY here (it shows in summaries, but adding events
-  happens in the Household room): an appointment/event ("dentist tuesday
-  at 3") => task_add with its due date, never cal_add. Jotting something
-  down to keep ("note: the wifi password is X", "jot down that gate code",
-  any keep-this with no date and no time) => item_add with list_name
-  "notes"."""
+                 "notes, reminders, to-dos, lists)")
+    cal_rule = """- An APPOINTMENT/EVENT that happens at a set time ("put the dentist on the
+  calendar tuesday at 3", "gab's recital friday", "dinner with the smiths
+  saturday 7pm") => cal_add with text = a short title and at ('yyyy-mm-dd HH:MM',
+  or just 'yyyy-mm-dd' for all-day). Calendar = something HAPPENING at a time; a
+  to-do = something to DO (maybe by a day); a reminder = a ping.
+- "add to log ..." / "log that ..." / "for the log, ..." / "note in the log"
+  => log_add with text = the thing to record (a vibe, a funny moment, something
+  that happened today). The log is the family's daily journal.""" if db.cal else """- The calendar is READ-ONLY here (it shows in summaries, but events are added
+  in the Household room): an appointment ("dentist tuesday at 3") => item_add
+  to list "to-dos" with its due date, never cal_add. A keep-this jot ("note: the
+  wifi password is X") => item_add with list_name "notes". "add to log" => log_add
+  is a Household feature; here just item_add to "notes"."""
     system = f"""You classify one message from a {chat_desc} into a JSON list of actions.
-A message may contain SEVERAL actions ("by today we need X, and by friday Y"
-= two task_adds; "add milk, and remind us to call the vet thursday" =
-item_add + task_add) — emit one action object per thing, in message order.
-Most messages are exactly one action.
+A message may contain SEVERAL actions ("get milk, and remind me to call the vet
+thursday" = item_add + remind_add) — emit one action object per thing, in message
+order. Most messages are exactly one action.
 Today is {now.isoformat()} ({now.strftime('%A')}) and the time right now is
-{now_dt.strftime('%H:%M')} (24h) — resolve relative times ("in 5 minutes",
-"in an hour") from that. Message author: {sender_name}.
-Open tasks (id title due):
-{tasks}
-Recently deleted tasks (restorable):
+{now_dt.strftime('%H:%M')} (24h) — resolve relative times ("in 5 minutes", "in an
+hour") from that. Message author: {sender_name}. Family: [{", ".join(FAMILY)}].
+
+The world is THREE buckets: LISTS (any number of named lists — shopping, chores,
+to-dos, packing…; items may carry a due date and a person), the CALENDAR (timed
+appointments), and REMINDERS (pings at a moment). "to-dos" is the catch-all list
+for things to do; "chores" is its own list.
+
+Open lists (name, then its items as #id):
+{listing}
+Existing list names: {list_names}
+Recently removed items (restorable):
 {deleted or "(none)"}
-Open list items (id [list] name):
-{items}
 Pending reminders (id time text):
 {reminders}
 
 Rules:
-- Weeks run Monday–Sunday. "this week" = through the coming Sunday
-  (inclusive); "next week" = the following Monday–Sunday; "the weekend" =
-  the coming Saturday/Sunday.
-- Something the family needs to do ("we need to X by Friday", "X by today/EOD",
-  "Thursday we need to X", "remind us to X") => intent task_add. title short,
-  imperative, no dates or names in it; due as ISO yyyy-mm-dd (resolve
-  today/tomorrow/EOD = today/weekday names = the NEXT such day, today if it is
-  that day; "" if no date was given). assignee: if the task is for one
-  specific person ("I need dylan to X", "gab should X", "remind me to X" =
-  the author) use their name from [{", ".join(FAMILY)}], else "" (whole
-  household).
-- Marking one finished ("done 3", "did the plumber thing") => task_done with
-  task_id from the open list above.
-- Moving a date ("push #3 to friday", "snooze the car thing to next week")
-  => task_snooze with task_id + new_due. Rewording/changing/reassigning
-  ("give #3 to gab") => task_edit with task_id and only the changed
-  new_title/new_due/new_assignee.
-- Removing a task => task_delete + task_id; bringing one back => task_restore.
-- Wanting a PING at a specific moment ("remind me at 5 to leave", "remind us
-  thursday at 9am to put the bins out", "tomorrow morning remind me to X")
-  => remind_add with title (the thing, short) and at as 'yyyy-mm-dd HH:MM'
-  24h local (resolve like due dates; morning=09:00, noon=12:00,
-  afternoon=15:00, evening/tonight=19:00; bare "at 5" after noon means
-  17:00). assignee as for tasks ("remind me" = the author, "remind us" = "").
-  A DAY deadline with no clock time ("by friday") stays a task_add, NOT a
-  reminder. Cancelling one => remind_cancel with rem_id from the pending
-  list above; "what reminders are set" => remind_show.
+- Weeks run Monday–Sunday. "this week" = through the coming Sunday (inclusive);
+  "next week" = the following Monday–Sunday; "the weekend" = the coming Sat/Sun.
+- ADDING to a list ("add milk and eggs to shopping", "put batteries on the
+  hardware list", "we need to renew the registration by friday", "dylan should
+  call the plumber thursday", "remember to water the plants") => item_add.
+  Fields: list_name (short, lowercase — reuse an existing name above when it
+  fits); items = each thing separately, short, no dates/names inside; due as ISO
+  yyyy-mm-dd if a day was given (today/tomorrow/EOD=today, a weekday = the NEXT
+  such day, "" if none); assignee = one Family name if it's for one person
+  ("I"/"me"/"remind me" = the author), else ""; section (lowercase) only if they
+  put it in a named part of the list (e.g. recurring chores => list "chores"
+  section "recurring"), else "".
+  ROUTING: groceries/food with no list named => list_name "shopping"; a plain
+  "we need to X" / "don't forget to X" / "add X" to-do with no list named =>
+  list_name "to-dos". If a thing could sensibly go on more than one existing
+  list and none was named, DO NOT GUESS — use intent ask (see below).
+- Starting an empty list ("make a packing list") => item_add, that list_name,
+  items [].
+- Checking an item off ("got the milk", "did the plumber thing", "done #4")
+  => item_done with item_id from the lists above.
+- Rewording/redating/reassigning/moving ("push #3 to friday", "give #3 to gab",
+  "rename #3 to X") => item_edit with item_id and only the changed
+  new_name/new_due/new_assignee. Removing one => item_remove + item_id; bringing
+  one back ("restore #5") => item_restore + item_id.
+- MANAGING lists: "show the shopping list" / "what's on chores" => list_show
+  with list_name. "what lists do we have" / "show all my lists" => lists_show.
+  "rename hardware to garage" => list_rename with list_name + new_list_name.
+  "clear/delete the shopping list" => list_clear + list_name.
+- Wanting a PING at a set moment ("remind me at 5 to leave", "remind us thursday
+  at 9am to put the bins out") => remind_add with title... use field "text" for
+  the thing (short) and at as 'yyyy-mm-dd HH:MM' 24h local (resolve like due
+  dates; morning=09:00, noon=12:00, afternoon=15:00, evening/tonight=19:00; bare
+  "at 5" after noon = 17:00). assignee like items. A DAY deadline with no clock
+  time ("by friday") is an item_add to "to-dos", NOT a reminder. Cancel =>
+  remind_cancel with rem_id; "what reminders are set" => remind_show.
 {cal_rule}
-- Adding to a list ("add milk and eggs to shopping", "put batteries on the
-  hardware list") => item_add with list_name (short, lowercase; default
-  "shopping" for groceries-like things) and items = each thing separately.
-- Checking a list item off ("got the milk") => item_done with item_id from the
-  list above. Removing one by mistake-entry => item_remove + item_id.
-- Starting a fresh list with nothing on it yet ("make a grocery list")
-  => item_add with that list_name and items [].
-- BROAD questions get the BROAD view: "what do I/we have to do today",
-  "what's the day/week look like", "what's on today/this week", anything
-  about THE CALENDAR, any non-specific what's-happening ask => post_now
-  (kind morning for today, week for the week) — those views include
-  calendar events, tasks, and reminders together. When in doubt between
-  a summary and a narrower list, choose the summary.
-- SPECIFIC questions get the specific list: "what tasks does dylan have
-  this week", "show tasks", "what's still open", "what got done" =>
-  tasks_show with scope (today|week|all|overdue|done) and assignee when
-  one person is named. "show shopping list" / "what lists do we have"
-  => list_show with list_name ("" = all lists).
-- Emptying a list ("clear the shopping list") => list_clear + list_name.
-- Asking for the morning/evening/week summary right now => post_now with kind.
+- BROAD questions get the BROAD view: "what do we have to do today", "what's the
+  day/week look like", "what's on today/this week", anything about THE CALENDAR
+  => post_now (kind morning for today, week for the week). When torn between a
+  summary and a narrow list, choose the summary.
+- To-do questions: "what do I still have to do", "what's on my plate", "show my
+  to-dos", "what got done" => todos_show with scope (today|week|all|overdue|done)
+  and assignee when one person is named ("what do I have" = the author).
 - Asking what you can do => help.
-- Anything else (greetings, chatter between the humans, unclear) => intent
-  other with reply as a one-line response ONLY if the message was addressed
-  to the bot, else reply "".
+- UNSURE? If you genuinely cannot tell which list an item belongs to, or which
+  item/list a command targets, DO NOT guess and DO NOT invent — use intent ask
+  with reply = one short clarifying question ("Which list should 'gym bag' go
+  on — packing, or to-dos?"). Prefer asking over a wrong guess.
+- Anything else (greetings, chatter between the humans, unclear and not for the
+  bot) => intent other with reply = a one-line response ONLY if the message was
+  addressed to the bot, else reply "".
 Every JSON field is required in every action: set unused string fields to "",
-unused numbers to 0, unused arrays to []. For task_add, title MUST be filled
-in. Chatter not addressed to the bot = one "other" action with reply "".
+unused numbers to 0, unused arrays to []. For item_add, items MUST be filled in
+(unless starting an empty list). Chatter not addressed to the bot = one "other"
+action with reply "".
 Output only the JSON object: {{"actions": [...]}}."""
     # Generous token budget: several actions × all-required fields (local
     # tokens are free; a starved response is not).
@@ -534,7 +620,7 @@ def valid_at(s):
 
 
 def do_remind_add(db, act, sender):
-    text = (act.get("title") or "").strip()[:120]
+    text = (act.get("text") or "").strip()[:120]
     at = valid_at(act.get("at"))
     if not text or not at:
         return "Remind who to do what, when? ('remind me thursday at 9 to call the vet')"
@@ -573,25 +659,31 @@ def queue_cal(db, op, uid, summary="", start="", sender=""):
 
 
 def task_uid(task_id):
+    # Retained only so the one-time merge can retire the old task mirrors.
     return f"remy-task-{task_id}@remy.local"
+
+
+def item_uid(item_id):
+    return f"remy-item-{item_id}@remy.local"
 
 
 def rem_uid(rem_id):
     return f"remy-rem-{rem_id}@remy.local"
 
 
-def sync_task_event(db, task_id):
-    """Make the calendar mirror match the task row: delete the old event,
-    re-create if the task is open and dated (all-day on the due day)."""
-    r = db.execute("SELECT * FROM task WHERE id=?", (task_id,)).fetchone()
-    queue_cal(db, "delete", task_uid(task_id))
+def sync_item_event(db, item_id):
+    """Make the calendar mirror match the item row: delete the old event,
+    re-create if the item is open and dated (all-day on the due day). Only
+    dated items ever reach the calendar."""
+    r = db.execute("SELECT * FROM item WHERE id=?", (item_id,)).fetchone()
+    queue_cal(db, "delete", item_uid(item_id))
     if r and not r["deleted"] and r["done_ts"] is None and r["due"]:
-        queue_cal(db, "create", task_uid(task_id),
-                  f"☐ {r['title']}{fmt_who(r)}", r["due"], r["created_by"])
+        queue_cal(db, "create", item_uid(item_id),
+                  f"☐ {r['name']}{fmt_who(r)}", r["due"], r["added_by"])
 
 
 def do_cal_add(db, act, sender):
-    title = (act.get("title") or "").strip()[:120]
+    title = (act.get("text") or "").strip()[:120]
     at = valid_at(act.get("at")) or valid_date((act.get("at") or "").strip()[:10])
     if not title or not at:
         return "Put what on the calendar, when? ('dentist on the calendar tuesday at 3')"
@@ -630,173 +722,129 @@ def do_remind_show(db):
                                  or "(none)")
 
 
-def do_task_add(db, act, sender):
-    title = (act.get("title") or "").strip()[:120]
-    if not title:
-        return "I couldn't make out what the task is — try 'we need to X by friday'."
-    due = valid_date(act.get("due", ""))
-    who = valid_assignee(act.get("assignee"))
-    db.execute("INSERT INTO task(title,due,assignee,created_by,created_ts) VALUES(?,?,?,?,?)",
-               (title, due, who, sender, int(time.time())))
-    db.commit()
-    r = db.execute("SELECT * FROM task ORDER BY id DESC LIMIT 1").fetchone()
-    if due:
-        sync_task_event(db, r["id"])
-    return f"✓ added {fmt_task(r)}"
-
-
-def get_task(db, act, deleted):
-    return db.execute("SELECT * FROM task WHERE id=? AND deleted=?",
-                      (act.get("task_id"), deleted)).fetchone()
-
-
-def do_task_done(db, act, sender):
-    r = get_task(db, act, 0)
-    if not r:
-        return "Couldn't tell which task you meant — say it with the #id (e.g. 'done 3')."
-    db.execute("UPDATE task SET done_ts=?, done_by=? WHERE id=?",
-               (int(time.time()), sender, r["id"]))
-    db.commit()
-    if r["due"]:
-        sync_task_event(db, r["id"])
-    return f"✔ nice — {r['title']} done"
-
-
-def do_task_edit(db, act):
-    r = get_task(db, act, 0)
-    if not r:
-        return "Couldn't tell which task you meant — use its #id."
-    changes, params = [], []
-    if act.get("new_title"):
-        changes.append("title=?"); params.append(act["new_title"].strip()[:120])
-    if act.get("new_due"):
-        changes.append("due=?"); params.append(valid_date(act["new_due"]))
-    if act.get("new_assignee"):
-        changes.append("assignee=?"); params.append(valid_assignee(act["new_assignee"]))
-    if not changes:
-        return "Nothing to change that I understood."
-    db.execute(f"UPDATE task SET {','.join(changes)} WHERE id=?", (*params, r["id"]))
-    db.commit()
-    sync_task_event(db, r["id"])
-    return "✏️ " + fmt_task(db.execute("SELECT * FROM task WHERE id=?", (r["id"],)).fetchone())
-
-
-def do_task_snooze(db, act):
-    r = get_task(db, act, 0)
-    if not r:
-        return "Couldn't tell which task to move — use its #id."
-    due = valid_date(act.get("new_due", ""))
-    if not due:
-        return "Move it to when? ('push #3 to friday')"
-    db.execute("UPDATE task SET due=?, done_ts=NULL WHERE id=?", (due, r["id"]))
-    db.commit()
-    sync_task_event(db, r["id"])
-    return "⏰ " + fmt_task(db.execute("SELECT * FROM task WHERE id=?", (r["id"],)).fetchone())
-
-
-def do_task_delete(db, act):
-    r = get_task(db, act, 0)
-    if not r:
-        return "Couldn't tell which task to remove — use its #id."
-    db.execute("UPDATE task SET deleted=1 WHERE id=?", (r["id"],))
-    db.commit()
-    if r["due"]:
-        sync_task_event(db, r["id"])
-    return f"🗑 removed {fmt_task(r)} (say 'restore #{r['id']}' to undo)"
-
-
-def do_task_restore(db, act):
-    r = get_task(db, act, 1)
-    if not r:
-        return "Nothing deleted under that #id."
-    db.execute("UPDATE task SET deleted=0 WHERE id=?", (r["id"],))
-    db.commit()
-    if r["due"]:
-        sync_task_event(db, r["id"])
-    return "↩️ restored " + fmt_task(r)
-
-
-def do_tasks_show(db, act):
-    scope = act.get("scope") or "all"
-    now = today()
-    if scope == "done":
-        rows = db.execute(
-            "SELECT * FROM task WHERE deleted=0 AND done_ts IS NOT NULL "
-            "ORDER BY done_ts DESC LIMIT 10").fetchall()
-        return "Recently done:\n" + ("\n".join(
-            f"✔ #{r['id']} {r['title']} ({r['done_by']})" for r in rows) or "(nothing yet)")
-    rows = open_tasks(db)
-    who = valid_assignee(act.get("assignee"))
-    if who:
-        rows = [r for r in rows if r["assignee"] == who]
-    if scope == "today":
-        rows = [r for r in rows if r["due"] and r["due"] <= now.isoformat()]
-        head = "Today (and overdue):"
-    elif scope == "overdue":
-        rows = [r for r in rows if r["due"] and r["due"] < now.isoformat()]
-        head = "Overdue:"
-    elif scope == "week":
-        end = (now + timedelta(days=6 - now.weekday())).isoformat()
-        rows = [r for r in rows if r["due"] and r["due"] <= end]
-        head = "This week:"
-    else:
-        head = "Open tasks:"
-    return head + "\n" + ("\n".join("• " + fmt_task(r) for r in rows) or "(nothing!)")
+def get_item(db, act, deleted=0):
+    return db.execute("SELECT * FROM item WHERE id=? AND deleted=?",
+                      (act.get("item_id"), deleted)).fetchone()
 
 
 def do_item_add(db, act, sender):
     names = [n.strip()[:80] for n in act.get("items", []) if n.strip()]
     ln = (act.get("list_name") or "shopping").strip().lower()[:30]
+    section = (act.get("section") or "").strip().lower()[:30]
+    due = valid_date(act.get("due", ""))
+    who = valid_assignee(act.get("assignee"))
     if not names:
-        # "make a grocery list": lists exist once something is on them, so
+        # "make a packing list": a list exists once something is on it, so
         # just teach the phrasing.
         return f"👍 '{ln}' it is — put things on it like 'add milk to {ln}'."
     now_ts = int(time.time())
+    ids = []
     for n in names:
-        db.execute("INSERT INTO item(list_name,name,added_by,added_ts) VALUES(?,?,?,?)",
-                   (ln, n, sender, now_ts))
+        db.execute("INSERT INTO item(list_name,name,due,assignee,section,added_by,added_ts)"
+                   " VALUES(?,?,?,?,?,?,?)", (ln, n, due, who, section, sender, now_ts))
+        ids.append(db.execute("SELECT last_insert_rowid() r").fetchone()["r"])
     db.commit()
+    if due:
+        for i in ids:
+            sync_item_event(db, i)
     n_open = db.execute("SELECT COUNT(*) c FROM item WHERE list_name=? AND deleted=0 "
                         "AND done_ts IS NULL", (ln,)).fetchone()["c"]
-    return f"✓ {', '.join(names)} → {ln} ({n_open} on the list)"
+    tail = fmt_due(due) + (f" ({who})" if who else "")
+    return f"✓ {', '.join(names)} → {ln}{tail} ({n_open} on the list)"
 
 
-def do_item_done(db, act):
-    r = db.execute("SELECT * FROM item WHERE id=? AND deleted=0",
-                   (act.get("item_id"),)).fetchone()
+def do_item_done(db, act, sender):
+    r = get_item(db, act)
     if not r:
         return "Couldn't tell which item — use its #id."
-    db.execute("UPDATE item SET done_ts=? WHERE id=?", (int(time.time()), r["id"]))
+    db.execute("UPDATE item SET done_ts=?, done_by=? WHERE id=?",
+               (int(time.time()), sender, r["id"]))
     db.commit()
+    if r["due"]:
+        sync_item_event(db, r["id"])
     return f"✔ {r['name']} checked off {r['list_name']}"
 
 
+def do_item_edit(db, act):
+    r = get_item(db, act)
+    if not r:
+        return "Couldn't tell which item — use its #id."
+    changes, params = [], []
+    if act.get("new_name"):
+        changes.append("name=?"); params.append(act["new_name"].strip()[:80])
+    if act.get("new_due"):
+        # A move also re-opens a done item ("push #3 to friday" implies not done).
+        changes.append("due=?"); params.append(valid_date(act["new_due"]))
+        changes.append("done_ts=NULL")
+    if act.get("new_assignee"):
+        changes.append("assignee=?"); params.append(valid_assignee(act["new_assignee"]))
+    if not changes:
+        return "Nothing to change that I understood."
+    db.execute(f"UPDATE item SET {','.join(changes)} WHERE id=?", (*params, r["id"]))
+    db.commit()
+    sync_item_event(db, r["id"])
+    return "✏️ " + fmt_item(db.execute("SELECT * FROM item WHERE id=?", (r["id"],)).fetchone())
+
+
 def do_item_remove(db, act):
-    r = db.execute("SELECT * FROM item WHERE id=? AND deleted=0",
-                   (act.get("item_id"),)).fetchone()
+    r = get_item(db, act)
     if not r:
         return "Couldn't tell which item — use its #id."
     db.execute("UPDATE item SET deleted=1 WHERE id=?", (r["id"],))
     db.commit()
-    return f"🗑 {r['name']} off {r['list_name']}"
+    if r["due"]:
+        sync_item_event(db, r["id"])
+    return f"🗑 {r['name']} off {r['list_name']} (say 'restore #{r['id']}' to undo)"
+
+
+def do_item_restore(db, act):
+    r = get_item(db, act, deleted=1)
+    if not r:
+        return "Nothing removed under that #id."
+    db.execute("UPDATE item SET deleted=0 WHERE id=?", (r["id"],))
+    db.commit()
+    if r["due"]:
+        sync_item_event(db, r["id"])
+    return "↩️ restored " + fmt_item(r)
 
 
 def do_list_show(db, act):
     ln = (act.get("list_name") or "").strip().lower()
-    rows = open_items(db)
-    if ln:
-        rows = [r for r in rows if r["list_name"] == ln]
-        if not rows:
-            return f"'{ln}' is empty."
+    if not ln:
+        return do_lists_show(db)
+    rows = open_items(db, ln)
     if not rows:
-        return "All lists are empty."
-    lines, last = [], None
+        return f"'{ln}' is empty."
+    lines, last_sec = [f"{ln}:"], None
     for r in rows:
-        if r["list_name"] != last:
-            lines.append(f"{r['list_name']}:")
-            last = r["list_name"]
-        lines.append(f"  • #{r['id']} {r['name']}")
+        if r["section"] != last_sec:
+            if r["section"]:
+                lines.append(f"  [{r['section']}]")
+            last_sec = r["section"]
+        lines.append(f"  • #{r['id']} {r['name']}{fmt_who(r)}{fmt_due(r['due'])}")
     return "\n".join(lines)
+
+
+def do_lists_show(db):
+    rows = db.execute(
+        "SELECT list_name, COUNT(*) c FROM item WHERE deleted=0 AND done_ts IS NULL "
+        "GROUP BY list_name ORDER BY list_name").fetchall()
+    if not rows:
+        return "No lists yet — start one like 'add milk to shopping'."
+    return "Your lists:\n" + "\n".join(f"  • {r['list_name']} ({r['c']})" for r in rows)
+
+
+def do_list_rename(db, act):
+    ln = (act.get("list_name") or "").strip().lower()
+    new = (act.get("new_list_name") or "").strip().lower()[:30]
+    if not ln or not new:
+        return "Rename which list to what? ('rename hardware to garage')"
+    n = db.execute("UPDATE item SET list_name=? WHERE list_name=? AND deleted=0",
+                   (new, ln)).rowcount
+    db.commit()
+    if not n:
+        return f"No open list called '{ln}'."
+    return f"✏️ '{ln}' → '{new}' ({n} item{'s' if n != 1 else ''})"
 
 
 def do_list_clear(db, act):
@@ -806,18 +854,60 @@ def do_list_clear(db, act):
     n = db.execute("UPDATE item SET deleted=1 WHERE list_name=? AND deleted=0",
                    (ln,)).rowcount
     db.commit()
-    return f"🧹 cleared {ln} ({n} items; restorable from history)"
+    return f"🧹 cleared {ln} ({n} item{'s' if n != 1 else ''}; restorable from history)"
+
+
+def do_todos_show(db, act):
+    scope = act.get("scope") or "all"
+    now = today()
+    if scope == "done":
+        rows = db.execute(
+            "SELECT * FROM item WHERE list_name='to-dos' AND deleted=0 "
+            "AND done_ts IS NOT NULL ORDER BY done_ts DESC LIMIT 10").fetchall()
+        return "Recently done:\n" + ("\n".join(
+            f"✔ #{r['id']} {r['name']} ({r['done_by']})" for r in rows) or "(nothing yet)")
+    rows = open_items(db, "to-dos")
+    who = valid_assignee(act.get("assignee"))
+    if who:
+        # "what do I have" means mine PLUS the household's unassigned ones —
+        # the whole point is what I could go do, not only what carries my name.
+        rows = [r for r in rows if r["assignee"] in (who, "")]
+    if scope == "today":
+        rows = [r for r in rows if r["due"] and r["due"] <= now.isoformat()]
+        head = "To-dos today (and overdue):"
+    elif scope == "overdue":
+        rows = [r for r in rows if r["due"] and r["due"] < now.isoformat()]
+        head = "Overdue:"
+    elif scope == "week":
+        end = (now + timedelta(days=6 - now.weekday())).isoformat()
+        rows = [r for r in rows if r["due"] and r["due"] <= end]
+        head = "This week's to-dos:"
+    else:
+        head = "To-dos" + (f" — {who}" if who else "") + ":"
+    return head + "\n" + ("\n".join("• " + fmt_item(r) for r in rows) or "(nothing!)")
+
+
+def do_log_add(db, act, sender):
+    if not db.cal:
+        return "The daily log lives in the Household room — add to it there."
+    txt = (act.get("text") or "").strip()[:400]
+    if not txt:
+        return "Add what to the log? ('add to log: Julia had her baby today')"
+    db.execute("INSERT INTO log_note(day,text,added_by,added_ts) VALUES(?,?,?,?)",
+               (today().isoformat(), txt, sender, int(time.time())))
+    db.commit()
+    return f"📝 added to today's log — {txt}"
 
 
 def week_section(db, start, title="📅 Week ahead:"):
     """From `start` through that week's Sunday (weeks run Monday–Sunday):
-    calendar events by day, then the week's tasks as their own list
+    calendar events by day, then the week's dated to-dos as their own list
     (captain's preference over inlining them into their due days)."""
     end = start + timedelta(days=6 - start.weekday())
-    tasks = [r for r in open_tasks(db)
-             if r["due"] and start.isoformat() <= r["due"] <= end.isoformat()]
+    todos = [r for r in dated_open(db)
+             if start.isoformat() <= r["due"] <= end.isoformat()]
     events, _ = calendar_events(start, end)
-    if not tasks and not events:
+    if not todos and not events:
         return f"{title} clear so far."
     by_day = {}
     for ev in events:
@@ -826,23 +916,24 @@ def week_section(db, start, title="📅 Week ahead:"):
     for d in sorted(by_day):
         lines.append(date.fromisoformat(d).strftime("%A %b %-d") + ":")
         lines += ["  " + s for s in by_day[d]]
-    if tasks:
-        lines.append("Tasks due:")
-        lines += ["  • " + fmt_task(r) for r in tasks]
+    if todos:
+        lines.append("To-dos due:")
+        lines += ["  • " + fmt_item(r) for r in todos]
     return "\n".join(lines)
 
 
 def morning_post(db):
     now = today()
     lines = [f"☀️ {now.strftime('%A, %B %-d')}"]
-    overdue = [r for r in open_tasks(db) if r["due"] and r["due"] < now.isoformat()]
-    due_today = [r for r in open_tasks(db) if r["due"] == now.isoformat()]
+    dated = dated_open(db)
+    overdue = [r for r in dated if r["due"] < now.isoformat()]
+    due_today = [r for r in dated if r["due"] == now.isoformat()]
     if overdue:
         lines.append("Overdue:")
-        lines += [f"  • #{r['id']} {r['title']}{fmt_who(r)}{fmt_due(r['due'])}" for r in overdue]
+        lines += [f"  • #{r['id']} {r['name']}{fmt_who(r)}{fmt_due(r['due'])}" for r in overdue]
     if due_today:
         lines.append("Today:")
-        lines += [f"  • #{r['id']} {r['title']}{fmt_who(r)}" for r in due_today]
+        lines += [f"  • #{r['id']} {r['name']}{fmt_who(r)}" for r in due_today]
     rems = [r for r in pending_reminders(db) if r["at"][:10] == now.isoformat()]
     if rems:
         lines.append("Reminders today:")
@@ -867,26 +958,21 @@ def evening_post(db):
     day_start = int(datetime.combine(now, datetime.min.time(), TZ).timestamp())
     lines = [f"🌙 Evening report — {now.strftime('%A')}"]
     done = db.execute(
-        "SELECT * FROM task WHERE deleted=0 AND done_ts>=? ORDER BY done_ts",
+        "SELECT * FROM item WHERE deleted=0 AND done_ts>=? ORDER BY done_ts",
         (day_start,)).fetchall()
-    checked = db.execute(
-        "SELECT COUNT(*) c FROM item WHERE deleted=0 AND done_ts>=?",
-        (day_start,)).fetchone()["c"]
-    if done or checked:
+    if done:
         lines.append("Done today:")
-        lines += [f"  ✔ {r['title']} ({r['done_by']})" for r in done]
-        if checked:
-            lines.append(f"  ✔ {checked} list item{'s' if checked > 1 else ''} checked off")
-    missed = [r for r in open_tasks(db) if r["due"] and r["due"] <= now.isoformat()]
+        lines += [f"  ✔ {r['name']} ({r['done_by']})" for r in done]
+    missed = [r for r in dated_open(db) if r["due"] <= now.isoformat()]
     if missed:
         lines.append("Last call:")
-        lines += [f"  • #{r['id']} {r['title']}{fmt_who(r)}{fmt_due(r['due'])}" for r in missed]
+        lines += [f"  • #{r['id']} {r['name']}{fmt_who(r)}{fmt_due(r['due'])}" for r in missed]
     tomorrow = now + timedelta(days=1)
-    due_tmrw = [r for r in open_tasks(db) if r["due"] == tomorrow.isoformat()]
+    due_tmrw = [r for r in dated_open(db) if r["due"] == tomorrow.isoformat()]
     events, _ = calendar_events(tomorrow, tomorrow)
     if due_tmrw or events:
         lines.append("Tomorrow:")
-        lines += [f"  • #{r['id']} {r['title']}{fmt_who(r)}" for r in due_tmrw]
+        lines += [f"  • #{r['id']} {r['name']}{fmt_who(r)}" for r in due_tmrw]
         lines += ["  ◦ " + fmt_event(ev) for ev in events]
     if len(lines) == 1:
         lines.append("Quiet day — nothing logged, nothing due.")
@@ -896,24 +982,128 @@ def evening_post(db):
     return "\n".join(lines)
 
 
-HOME_HELP = """I keep the family's tasks, lists, and day plans. Examples:
-• we need to renew the car registration by friday
-• I need dylan to call the plumber by thursday / what's on gab's plate?
+# ---------------------------------------------------------------- daily log
+
+def fmt_clock(dt):
+    """A datetime -> a friendly '10am' / '2:30pm'."""
+    ap = dt.strftime("%p").lower()
+    return f"{dt.strftime('%-I')}{ap}" if dt.minute == 0 else f"{dt.strftime('%-I:%M')}{ap}"
+
+
+def build_day_log(db, day):
+    """The day's raw material for the log: (itinerary_lines, done, notes).
+
+    itinerary = timed calendar events + reminders that fired, in time order;
+    done = items checked off that day; notes = what people dropped in with
+    'add to log'. All deterministic — no model involved here.
+    """
+    d_iso = day.isoformat()
+    day_start = int(datetime.combine(day, datetime.min.time(), TZ).timestamp())
+    day_end = day_start + 86400
+    entries = []  # (sortkey, text)
+    events, _ = calendar_events(day, day)
+    for ev in events:
+        s = ev["start"]
+        summ = ev.get("summary", "(untitled)")
+        if len(s) > 10:
+            t = datetime.fromisoformat(s).astimezone(TZ)
+            entries.append((t.strftime("%H:%M"), f"{fmt_clock(t)} — {summ}"))
+        else:
+            entries.append(("zz", f"all day — {summ}"))
+    for r in db.execute(
+            "SELECT * FROM reminder WHERE deleted=0 AND fired_ts>=? AND fired_ts<? ORDER BY at",
+            (day_start, day_end)).fetchall():
+        hhmm = r["at"][11:]
+        clock = fmt_clock(datetime.strptime(hhmm, "%H:%M")) if hhmm else "reminder"
+        entries.append((hhmm or "zz", f"{clock} — {r['text']}"))
+    entries.sort(key=lambda x: x[0])
+    done = [r["name"] for r in db.execute(
+        "SELECT * FROM item WHERE deleted=0 AND done_ts>=? AND done_ts<? ORDER BY done_ts",
+        (day_start, day_end)).fetchall()]
+    notes = [r["text"] for r in db.execute(
+        "SELECT text FROM log_note WHERE day=? AND deleted=0 ORDER BY id", (d_iso,)).fetchall()]
+    return [e[1] for e in entries], done, notes
+
+
+LOG_SYS = """You are writing one day's entry in a family's shared daily log — a
+warm, human record of the day. You get: the day's itinerary (timed things, in
+order), what got done, and freeform notes people dropped in chat. Produce
+GitHub-flavored markdown for the body only (a date heading is added for you).
+Rules, followed exactly:
+- Render the itinerary as a bulleted list, in the given order and wording
+  ("- 10am — meet with Julia").
+- If a note clearly refers to one itinerary line (same person or event), attach
+  it as an indented sub-bullet under that line ("  - she just had her baby").
+  Notes that don't match any line go under a final "- also:" bullet.
+- If the notes convey the day's overall mood or a noteworthy moment, end with ONE
+  italic sentence capturing it. If they don't, add nothing.
+- Invent NOTHING — use only the facts given. No date heading.
+Output only the markdown body."""
+
+
+def build_day_markdown(db, day):
+    timed, done, notes = build_day_log(db, day)
+    header = f"## {day.strftime('%A, %B %-d, %Y')}"
+    if not timed and not done and not notes:
+        return f"{header}\n\nQuiet one — nothing on the books.\n"
+    scaffold = [f"- {t}" for t in timed] + [f"- did: {d}" for d in done]
+    plain = header + "\n\n" + "\n".join(scaffold) + "\n"
+    if not notes:
+        return plain
+    # Notes are what make a day read like a day — hand the scaffold + notes to
+    # the local model to weave them in and add a closing line. Fall back to the
+    # plain scaffold (notes listed) if the model is unavailable or misbehaves.
+    payload = ("Itinerary (in order):\n" + ("\n".join(f"- {t}" for t in timed) or "- (nothing timed)")
+               + "\n\nGot done:\n" + ("\n".join(f"- {d}" for d in done) or "- (nothing logged)")
+               + "\n\nNotes from chat:\n" + "\n".join(f"- {n}" for n in notes))
+    try:
+        out = llm_text(LOG_SYS, payload).strip()
+        if out:
+            return header + "\n\n" + out + "\n"
+    except Exception:
+        log.exception("log compose failed; using scaffold")
+    return plain + "Notes:\n" + "\n".join(f"- {n}" for n in notes) + "\n"
+
+
+def write_log(db, day):
+    """Append the day's entry to the log file and poke the vault mirror."""
+    md = build_day_markdown(db, day)
+    new_file = not os.path.exists(LOG_PATH) or os.path.getsize(LOG_PATH) == 0
+    with open(LOG_PATH, "a") as f:
+        if new_file:
+            f.write("# Family log\n\n")
+        else:
+            f.write("\n")
+        f.write(md)
+    try:
+        os.chmod(LOG_PATH, 0o644)  # the mirror unit (a different user) reads it
+    except OSError:
+        pass
+    try:
+        with open(LOG_FLAG, "w") as f:
+            f.write(str(time.time()))
+    except OSError:
+        log.exception("log flag write failed")
+
+
+HOME_HELP = """I keep the family organized around three things — lists, the
+calendar, and reminders — plus a daily log. Examples:
+• add milk and eggs to shopping / got the milk / show the shopping list
+• make a packing list / what lists do we have? / rename hardware to garage
+• we need to renew the registration by friday / I need dylan to call the plumber thursday
+• what do I still have to do? / what's on gab's plate this week? / done #4
 • remind me thursday at 9 to defrost the chicken / what reminders are set?
 • put the dentist on the calendar tuesday at 3 — goes straight to Migadu
-• thursday we need to take the cat to the vet / done 3 / push #3 to monday
-• add milk and eggs to shopping / got the milk / show shopping list
-• what's on today? / this week? / show tasks
-• morning/evening summary — ask any time; I post them at 7:00 and 19:00
-I also show the family calendar in those posts (synced from Migadu).
+• add to log: Julia had her baby today — I write the day's log each night
+• what's on today? / this week? — morning/evening summaries post at 7:00 and 19:00
+If I'm not sure which list something belongs on, I'll ask.
 (Money things live in the Budget room — I answer there too.)"""
 
-SCRATCH_HELP = """Your scratchpad — notes, reminders, tasks, quick lists. Examples:
-• note: the gate code is 4482 / show notes
+SCRATCH_HELP = """Your scratchpad — notes, reminders, to-dos, quick lists. Examples:
+• note: the gate code is 4482 / show the notes list
 • remind me at 5 to leave / remind me thursday at 9 to call back / what reminders are set?
-• renew the passport by friday / done 3 / push #3 to monday
-• add batteries to hardware / show hardware list
-• what's on today? / this week? / show tasks
+• renew the passport by friday / what do I still have to do? / done #3
+• add batteries to hardware / what lists do we have?
 Summaries show the family calendar, but it's read-only from here —
 add events in the Household room. No scheduled posts; ask when you
 want a summary."""
@@ -1228,32 +1418,30 @@ class Bot:
             return
         log.info("%s %s: %r -> %s", "home" if db is self.hdb else "scratch",
                  sender, text, [a.get("intent") for a in acts])
-        MUTATORS = ("task_add", "task_done", "task_edit", "task_snooze",
-                    "task_delete", "task_restore", "cal_add", "remind_add",
-                    "remind_cancel", "item_add",
-                    "item_done", "item_remove", "list_clear")
+        MUTATORS = ("item_add", "item_done", "item_edit", "item_remove",
+                    "item_restore", "list_rename", "list_clear", "cal_add",
+                    "remind_add", "remind_cancel", "log_add")
         replies, mutated = [], []
         for act in acts[:8]:  # runaway-parse backstop
             intent = act.get("intent")
             handlers = {
-                "task_add": lambda a=act: do_task_add(db, a, sender),
-                "task_done": lambda a=act: do_task_done(db, a, sender),
-                "task_edit": lambda a=act: do_task_edit(db, a),
-                "task_snooze": lambda a=act: do_task_snooze(db, a),
-                "task_delete": lambda a=act: do_task_delete(db, a),
-                "task_restore": lambda a=act: do_task_restore(db, a),
-                "tasks_show": lambda a=act: do_tasks_show(db, a),
+                "item_add": lambda a=act: do_item_add(db, a, sender),
+                "item_done": lambda a=act: do_item_done(db, a, sender),
+                "item_edit": lambda a=act: do_item_edit(db, a),
+                "item_remove": lambda a=act: do_item_remove(db, a),
+                "item_restore": lambda a=act: do_item_restore(db, a),
+                "list_show": lambda a=act: do_list_show(db, a),
+                "lists_show": lambda: do_lists_show(db),
+                "list_rename": lambda a=act: do_list_rename(db, a),
+                "list_clear": lambda a=act: do_list_clear(db, a),
+                "todos_show": lambda a=act: do_todos_show(db, a),
                 "cal_add": lambda a=act: (
                     do_cal_add(db, a, sender) if db.cal else
                     "(the calendar is read-only here — add events in the Household room)"),
                 "remind_add": lambda a=act: do_remind_add(db, a, sender),
                 "remind_cancel": lambda a=act: do_remind_cancel(db, a),
                 "remind_show": lambda: do_remind_show(db),
-                "item_add": lambda a=act: do_item_add(db, a, sender),
-                "item_done": lambda a=act: do_item_done(db, a),
-                "item_remove": lambda a=act: do_item_remove(db, a),
-                "list_show": lambda a=act: do_list_show(db, a),
-                "list_clear": lambda a=act: do_list_clear(db, a),
+                "log_add": lambda a=act: do_log_add(db, a, sender),
             }
             if intent in handlers:
                 replies.append(handlers[intent]())
@@ -1264,7 +1452,7 @@ class Bot:
                 replies.append(make(db))
             elif intent == "help":
                 replies.append(HOME_HELP if db.cal else SCRATCH_HELP)
-            elif intent == "other" and act.get("reply"):
+            elif intent in ("ask", "other") and act.get("reply"):
                 replies.append(act["reply"][:400])
             if intent in MUTATORS:
                 mutated.append(intent)
@@ -1336,6 +1524,14 @@ class Bot:
                         await self.send(self.home_room, make(self.hdb), notify=True)
                     except Exception:
                         log.exception("%s post failed", key)
+            # The family log: composed once, late, for the day that's ending.
+            # Household only (the scratchpad has no scheduled writes).
+            if hhmm >= LOG_TIME and meta_get(self.hdb, "last_log") != day:
+                meta_set(self.hdb, "last_log", day)
+                try:
+                    await asyncio.to_thread(write_log, self.hdb, now.date())
+                except Exception:
+                    log.exception("log write failed")
             # Reminders due now (or missed while down — fired late, once,
             # flagged with the time they were meant for). Household and
             # scratchpad each ping their own room.
