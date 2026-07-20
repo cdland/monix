@@ -580,7 +580,8 @@ Rules:
   time ("by friday") is an item_add to "to-dos", NOT a reminder. Cancelling
   ("cancel the csa reminder", "never mind that reminder") => remind_cancel with
   text = words from the reminder to match (leave "" only if there is exactly
-  one pending). "what reminders are set" => remind_show.
+  one pending). "what reminders are set" / "my reminders today" / "reminders
+  this week" => remind_show with scope (today|week|all).
 {cal_rule}
 - DAY/SCHEDULE view: "what's the day/week look like", "what's on today/this
   week", "what's happening", anything explicitly about THE CALENDAR/SCHEDULE
@@ -630,12 +631,11 @@ def pending_reminders(db):
         "ORDER BY at").fetchall()
 
 
-def fmt_reminder(r):
-    d = date.fromisoformat(r["at"][:10])
-    day = ("today" if d == today() else "tomorrow" if d == today() + timedelta(days=1)
-           else d.strftime("%a %b %-d"))
+def fmt_reminder(r, with_date=True):
+    dt = datetime.strptime(r["at"], "%Y-%m-%d %H:%M")
     who = f" — {r['assignee']}" if r["assignee"] else ""
-    return f"{day} {r['at'][11:]} {r['text']}{who}"
+    when = f"{dt.strftime('%a %b %-d')} {fmt_clock(dt)}" if with_date else fmt_clock(dt)
+    return f"{when} - {r['text']}{who}"
 
 
 def valid_at(s):
@@ -751,10 +751,21 @@ def do_remind_cancel(db, act):
     return f"🗑 cancelled {fmt_reminder(r)}"
 
 
-def do_remind_show(db):
+def do_remind_show(db, act=None):
     rows = pending_reminders(db)
-    return "Reminders set:\n" + ("\n".join("⏰ " + fmt_reminder(r) for r in rows)
-                                 or "(none)")
+    scope = (act or {}).get("scope") or "all"
+    now = today()
+    with_date = True
+    if scope == "today":
+        rows = [r for r in rows if r["at"][:10] == now.isoformat()]
+        head, with_date = "Reminders today:", False  # all today -> time is enough
+    elif scope == "week":
+        end = (now + timedelta(days=6 - now.weekday())).isoformat()
+        rows = [r for r in rows if r["at"][:10] <= end]
+        head = "Reminders this week:"
+    else:
+        head = "Reminders set:"
+    return head + "\n" + ("\n".join("⏰ " + fmt_reminder(r, with_date) for r in rows) or "(none)")
 
 
 def renumber(db, list_name):
@@ -1546,7 +1557,7 @@ class Bot:
                     "(the calendar is read-only here — add events in the Household room)"),
                 "remind_add": lambda a=act: do_remind_add(db, a, sender),
                 "remind_cancel": lambda a=act: do_remind_cancel(db, a),
-                "remind_show": lambda: do_remind_show(db),
+                "remind_show": lambda a=act: do_remind_show(db, a),
                 "log_add": lambda a=act: do_log_add(db, a, sender),
             }
             if intent in handlers:
