@@ -43,19 +43,17 @@
       cfg = config.minecraft;
       networkFences = import ../../lib/network-fences.nix;
 
-      # PINNED MINECRAFT VERSION. 26.1.2 — the latest STABLE Minecraft release
-      # for which the full required performance mod set (Lithium, FerriteCore,
-      # Krypton, Spark) all have compatible Fabric builds on Modrinth. The very
-      # newest stable, 26.2, is deliberately NOT used: Krypton has no 26.2 build
-      # yet (its latest, 0.3.0, tops out at 26.1.2), and pinning ahead of the
-      # mods would mean shipping a server the mandated mods can't load. Pin the
-      # exact package (fabric-26_1_2), never a floating alias.
+      # PINNED MINECRAFT VERSION. 26.2 — the latest stable release, unblocked
+      # 2026-07-19 when Krypton 0.3.1 shipped its 26.2 build (the last of the
+      # required performance mod set to update). Bump rule: server pin, every
+      # mod hash below, and the players' clients move together. Pin the exact
+      # package (fabric-26_2), never a floating alias.
       # jre override: Minecraft 26.x class files are Java 25 (class version
       # 69), but nix-minecraft's package wraps this server with a Java 21
       # runtime — the JVM dies at launch with UnsupportedClassVersionError
       # (found live on fw0; invisible in the journal because tmux swallows
       # the crash). Pin the runtime the game actually needs.
-      serverPackage = pkgs.fabricServers.fabric-26_1_2.override {
+      serverPackage = pkgs.fabricServers.fabric-26_2.override {
         jre_headless = pkgs.jdk25_headless;
       };
 
@@ -73,25 +71,25 @@
         pkgs.fetchurl { inherit url sha512; };
 
       # THE MOD SET. Every version below was checked against Modrinth version
-      # metadata for game_version 26.1.2 + loader "fabric"; all are marked
+      # metadata for game_version 26.2 + loader "fabric"; all are marked
       # server_side, and none require a client-side counterpart.
       mods = {
         # --- Performance (the reason this list exists) ---
         # Lithium — general game-logic optimization. No dependencies.
         Lithium = mod {
-          url = "https://cdn.modrinth.com/data/gvQqBUqZ/versions/fQBdPR1m/lithium-fabric-0.24.6%2Bmc26.1.2.jar";
-          sha512 = "fac351f5b6150889b9355a01889c35b5798147d4bedb291594a590a2d41909eb8dc494ef0051317bf55886f2fc7fe134abbe2e755098df38473edb2bf43357e9";
+          url = "https://cdn.modrinth.com/data/gvQqBUqZ/versions/UPNexAfy/lithium-fabric-0.25.2%2Bmc26.2.jar";
+          sha512 = "db676376c05b7e912cdae5aad9e51f125adc1554ae2b204599ccb598751921aedbac98e97b9cba0333b6b52488c6b75c915a7dbd50436f97800387fe1aad1c50";
         };
         # FerriteCore — cuts server RAM use (shared block-state/model data).
         FerriteCore = mod {
           url = "https://cdn.modrinth.com/data/uXXizFIs/versions/d5ddUdiB/ferritecore-9.0.0-fabric.jar";
           sha512 = "d81fa97e11784c19d42f89c2f433831d007603dd7193cee45fa177e4a6a9c52b384b198586e04a0f7f63cd996fed713322578bde9a8db57e1188854ae5cbe584";
         };
-        # Krypton — network stack optimization. This is the mod that pins us to
-        # 26.1.2 (no 26.2 build exists yet). No dependencies.
+        # Krypton — network stack optimization. Historically the version gate
+        # (0.3.1 was the last of the set to reach 26.2). No dependencies.
         Krypton = mod {
-          url = "https://cdn.modrinth.com/data/fQEb0iXm/versions/kYAGItyj/krypton-0.3.0.jar";
-          sha512 = "14233210283a76f3cf435a3b8ddbcbd65a858d2b1a10b88ff643c0a01486dfd2bf1843bd3456cd4fb86cbb3b06f2dea0c4e663b1976a48e96de16d3b5a707ec9";
+          url = "https://cdn.modrinth.com/data/fQEb0iXm/versions/5WeL0Nkz/krypton-0.3.1.jar";
+          sha512 = "b8d9af34cd0050493afb8a6232cb8f785daa9d8887b7045f6e6a53c6bb9b5ffc4318fd9b0347a940eacfeba4773f10cb80ae0be1e79ce4c1888f96eda21e564e";
         };
 
         # --- Observability ---
@@ -109,14 +107,14 @@
         # ServerCore — server-only performance/QoL tuning (async chunk work,
         # dynamic view distance under load). No dependencies. No client needed.
         ServerCore = mod {
-          url = "https://cdn.modrinth.com/data/4WWQxlQP/versions/H6TboTA2/servercore-fabric-1.5.19%2B26.1.2.jar";
-          sha512 = "056d56d74508bf34f25ded9323a721be915b9273796100ee81c4a867717364539285b4ae9749e360d6699d485e3fba0561502a8c94979684b0cf79ce8e80afcd";
+          url = "https://cdn.modrinth.com/data/4WWQxlQP/versions/edrtnY9v/servercore-fabric-1.5.19%2B26.2.jar";
+          sha512 = "aa4cfc93f8e02172910302444330e37713dfcf2047d28e55eb7323a3cd5d51493374a0959aa3e626ec2bf43fc707a755508b83454bb34b6d57d65c069929074b";
         };
         # Chunksmith — admin convenience: pre-generate chunks so exploration
         # doesn't stutter. Server-side only, no dependencies.
         Chunksmith = mod {
-          url = "https://cdn.modrinth.com/data/4BeAEBIb/versions/cjj0T7Bm/Chunksmith-Fabric-2.2.1%2Bmc26.1.jar";
-          sha512 = "e4d7be86bfdc3a4f23acf0a1203b1745aa32c260abef7b81061494b795050861bc9174cbd92a7270edf2f24832e04a20ef9403bbb947c54d885f741f7c9c8f60";
+          url = "https://cdn.modrinth.com/data/4BeAEBIb/versions/StOy04qm/chunksmith-3.1.1%2B26.2.jar";
+          sha512 = "b8bbcd54e064e6a1b33a5ae290077ccff79b5430624271772d82a368670b2474ce2f2c3cd95318778ee7b4c3e5fd5cbc511d43459bb7862c67668e4737cff8d7";
         };
 
         # --- Library ---
@@ -125,8 +123,8 @@
         # mods need it, so it being present means future mod additions just
         # work. Server-side, inert on its own.
         FabricAPI = mod {
-          url = "https://cdn.modrinth.com/data/P7dR8mSH/versions/lOQ4tyDD/fabric-api-0.154.2%2B26.1.2.jar";
-          sha512 = "8e1b48a2bd10ddd6f1ea59a603a1f28255c2c2f9a2dda93fc196505dee0823eaded2da69d4f154ef654f9faa98e2340ed2b65557ec98637ffe888edc1072912e";
+          url = "https://cdn.modrinth.com/data/P7dR8mSH/versions/lVXlbH4w/fabric-api-0.155.2%2B26.2.jar";
+          sha512 = "cc56984378a27c5bcd56374d6ffbb27a45c6bf3355add2ac6be9817ccac5854362249bf9d0147eb271a70fda2716129204e240d53c9aa876a2a7861f4c7f880f";
         };
       };
     in
