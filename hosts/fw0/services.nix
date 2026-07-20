@@ -66,6 +66,35 @@
     ];
     aliases = [ "gpt-oss" ];
   };
+  # Dense small models for judgment-heavy chat (remy). Both ~18-20G UD-Q4_K_XL,
+  # so they populate fast; dense (not the 3B-active MoE) = better instruction
+  # following and routing. Mistral is remy's brain; Qwen 27B is on the bench
+  # for an A/B via remy.model.
+  inference.models."mistral-small-3.2-24b" = {
+    file = "Mistral-Small-3.2-24B-Instruct-2506-UD-Q4_K_XL.gguf";
+    flags = [
+      "-c"
+      "32768"
+      "--flash-attn"
+      "on"
+      "--jinja"
+    ];
+    aliases = [
+      "mistral"
+      "mistral-small"
+    ];
+  };
+  inference.models."qwen3.6-27b" = {
+    file = "Qwen3.6-27B-UD-Q4_K_XL.gguf";
+    flags = [
+      "-c"
+      "65536"
+      "--flash-attn"
+      "on"
+      "--jinja"
+    ];
+    aliases = [ "qwen3.6-dense" ];
+  };
 
   # Syncthing serves the declaratively managed ~/crate/sync mesh.
   services.syncthing.enable = true;
@@ -89,6 +118,10 @@
   ];
   remy.scratchpad.users = [ "@dylan:chat.su.is" ];
   remy.calendar.credentialsFile = config.secrets.remy-caldav-json.path;
+  # A French bot deserves a French model. Mistral Small 3.2 (dense 24B) —
+  # sharper instruction following/routing than the qwen a3b MoE. Flip this to
+  # "qwen3.6-27b" or "qwen3.6-35b-a3b" to A/B.
+  remy.model = "mistral-small-3.2-24b";
   # Mirror the daily log into the Syncthing/Obsidian vault (max:syncthing tree).
   remy.famlog.path = "/home/max/crate/sync/notes/famlog.md";
   remy.famlog.owner = "max";
