@@ -314,35 +314,43 @@ class CheckOffButton(
                     view.remove_item(child)
             await interaction.response.edit_message(view=view)
             return
-        # Rebuild the message from its own components: the clicked row's
-        # section becomes struck-through text; every other row keeps its
-        # button. (No bot-side state — the message is the state.)
-        view = discord.ui.LayoutView(timeout=None)
-        for comp in interaction.message.components:
-            if isinstance(comp, discord.components.SectionComponent):
-                text = comp.components[0].content
-                cid = getattr(comp.accessory, "custom_id", "") or ""
-                if cid == f"egb:{self.kind}:{self.row_id}":
-                    view.add_item(discord.ui.TextDisplay(f"~~{text}~~ ✅ {who}"))
-                    continue
-                m = self.template.match(cid)
-                if m:
-                    view.add_item(
-                        discord.ui.Section(
-                            discord.ui.TextDisplay(text),
-                            accessory=CheckOffButton(m["kind"], int(m["id"])),
-                        )
-                    )
-                else:
-                    view.add_item(discord.ui.TextDisplay(text))
-            elif isinstance(comp, discord.components.TextDisplay):
-                view.add_item(discord.ui.TextDisplay(comp.content))
+        view = rebuilt_view(
+            interaction.message.components, f"egb:{self.kind}:{self.row_id}", who
+        )
         await interaction.response.edit_message(view=view)
         if result != "ok":
             await interaction.followup.send(
                 f"(that one was already checked off on {day(result)})",
                 ephemeral=True,
             )
+
+
+def rebuilt_view(components, clicked_cid, who):
+    """Rebuild a list message from its own components after a ✓ click: the
+    clicked row's section becomes struck-through text; every other row
+    keeps its button. (No bot-side state — the message is the state.)"""
+    view = discord.ui.LayoutView(timeout=None)
+    template = CheckOffButton.__discord_ui_compiled_template__
+    for comp in components:
+        if isinstance(comp, discord.components.SectionComponent):
+            text = comp.children[0].content
+            cid = getattr(comp.accessory, "custom_id", "") or ""
+            if cid == clicked_cid:
+                view.add_item(discord.ui.TextDisplay(f"~~{text}~~ ✅ {who}"))
+                continue
+            m = template.match(cid)
+            if m:
+                view.add_item(
+                    discord.ui.Section(
+                        discord.ui.TextDisplay(text),
+                        accessory=CheckOffButton(m["kind"], int(m["id"])),
+                    )
+                )
+            else:
+                view.add_item(discord.ui.TextDisplay(text))
+        elif isinstance(comp, discord.components.TextDisplay):
+            view.add_item(discord.ui.TextDisplay(comp.content))
+    return view
 
 
 # Components-v2 messages have a 40-component budget; each row costs 3
