@@ -489,8 +489,11 @@ async def orders(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(description="Request a day or date range (opens a form)")
-async def request(interaction: discord.Interaction):
+@bot.tree.command(
+    name="request-off",
+    description="Request a day or date range off (opens a form)",
+)
+async def request_off(interaction: discord.Interaction):
     await interaction.response.send_modal(RequestModal())
 
 
