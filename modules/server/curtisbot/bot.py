@@ -107,6 +107,17 @@ def fmt_date(iso):
     return datetime.strptime(iso[:10], "%Y-%m-%d").strftime("%b %-d")
 
 
+def fmt_wday(iso):
+    """'2026-08-05' -> 'Wed Aug 5th' — request dates carry the weekday."""
+    dt = datetime.strptime(iso[:10], "%Y-%m-%d")
+    n = dt.day
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return dt.strftime(f"%a %b {n}{suffix}")
+
+
 def fmt_amount(x: float) -> str:
     return str(int(x)) if float(x).is_integer() else f"{x:g}"
 
@@ -203,8 +214,8 @@ def close_request(conn, req_id, who):
 
 def fmt_window(start, end):
     if start and end:
-        return f"{fmt_date(start)} → {fmt_date(end)}"
-    return fmt_date(start) if start else ""
+        return f"{fmt_wday(start)} → {fmt_wday(end)}"
+    return fmt_wday(start) if start else ""
 
 
 def order_text(r):
