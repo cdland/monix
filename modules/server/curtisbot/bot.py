@@ -299,6 +299,15 @@ class CheckOffButton(
                 "That row doesn't exist.", ephemeral=True
             )
             return
+        # Messages from before the layout-component switch carry plain
+        # content + a button row; just strike the text and drop the button.
+        if interaction.message.content:
+            view = discord.ui.View.from_message(interaction.message)
+            for child in list(view.children):
+                if getattr(child, "custom_id", None) == self.custom_id:
+                    view.remove_item(child)
+            await interaction.response.edit_message(view=view)
+            return
         # Rebuild the message from its own components: the clicked row's
         # section becomes struck-through text; every other row keeps its
         # button. (No bot-side state — the message is the state.)
