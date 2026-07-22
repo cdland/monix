@@ -200,21 +200,16 @@ def open_requests(conn):
     ).fetchall()
 
 
-def clear_done(conn):
-    """Hide checked-off rows from the lists. Returns (orders, requests) counts."""
-    ts = now()
-    o = conn.execute(
-        "UPDATE orders SET cleared_at = ? WHERE done_at IS NOT NULL"
+def clear_done(conn, table):
+    """Hide checked-off rows from one list. Returns the count hidden."""
+    assert table in ("orders", "requests")
+    n = conn.execute(
+        f"UPDATE {table} SET cleared_at = ? WHERE done_at IS NOT NULL"
         " AND cleared_at IS NULL",
-        (ts,),
-    ).rowcount
-    r = conn.execute(
-        "UPDATE requests SET cleared_at = ? WHERE done_at IS NOT NULL"
-        " AND cleared_at IS NULL",
-        (ts,),
+        (now(),),
     ).rowcount
     conn.commit()
-    return o, r
+    return n
 
 
 def close_request(conn, req_id, who):
@@ -552,13 +547,28 @@ async def requests(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(description="Clear checked-off rows out of the lists")
-async def clear(interaction: discord.Interaction):
+@bot.tree.command(
+    name="clear-wholesale",
+    description="Clear checked-off order lines out of /orders",
+)
+async def clear_wholesale(interaction: discord.Interaction):
     await interaction.response.defer()
-    o, r = clear_done(db_for(interaction))
+    n = clear_done(db_for(interaction), "orders")
     await interaction.followup.send(
-        f"Cleared {o} checked-off order line{'s' if o != 1 else ''}"
-        f" and {r} request{'s' if r != 1 else ''}."
+        f"Cleared {n} checked-off order line{'s' if n != 1 else ''}."
+        " (History is kept — nothing is deleted.)"
+    )
+
+
+@bot.tree.command(
+    name="clear-requests",
+    description="Clear checked-off requests out of /requests",
+)
+async def clear_requests(interaction: discord.Interaction):
+    await interaction.response.defer()
+    n = clear_done(db_for(interaction), "requests")
+    await interaction.followup.send(
+        f"Cleared {n} checked-off request{'s' if n != 1 else ''}."
         " (History is kept — nothing is deleted.)"
     )
 
