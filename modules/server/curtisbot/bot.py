@@ -120,28 +120,6 @@ def fmt_qty(amount, unit, item) -> str:
     return f"{fmt_amount(amount)} {item}"
 
 
-def parse_order_line(line):
-    """'Joe's: 25 lb Sawmill, 2 cases Guji, May 20' ->
-    ('Joe's', '25 lb Sawmill, 2 cases Guji', '<iso date>').
-    The needed-by date is optional; raises ValueError on a line without
-    a 'customer:' prefix or without items."""
-    if ":" not in line:
-        raise ValueError(line)
-    customer, rest = line.split(":", 1)
-    customer = customer.strip()
-    parts = [p.strip() for p in rest.split(",") if p.strip()]
-    needed = None
-    if len(parts) > 1:
-        try:
-            needed = parse_date(parts[-1])
-            parts = parts[:-1]
-        except ValueError:
-            pass
-    if not customer or not parts:
-        raise ValueError(line)
-    return customer, ", ".join(parts), needed
-
-
 # ---- db operations (plain functions so they can be tested without Discord)
 
 
@@ -155,14 +133,11 @@ def add_order(conn, account, item, who, needed_by=None):
     return cur.lastrowid
 
 
-def open_orders(conn, account=None):
+def open_orders(conn):
     """Visible = not yet cleared; includes checked-off rows until /clear."""
-    q = "SELECT * FROM orders WHERE cleared_at IS NULL"
-    args = []
-    if account is not None:
-        q += " AND account = ? COLLATE NOCASE"
-        args.append(account.strip())
-    return conn.execute(q + " ORDER BY id", args).fetchall()
+    return conn.execute(
+        "SELECT * FROM orders WHERE cleared_at IS NULL ORDER BY id"
+    ).fetchall()
 
 
 def check_order(conn, order_id, who):
@@ -177,19 +152,6 @@ def check_order(conn, order_id, who):
     )
     conn.commit()
     return "ok"
-
-
-def distinct_values(conn, column, prefix, open_only=False):
-    assert column in ("account", "item")
-    q = (
-        f"SELECT {column}, MAX(id) AS latest FROM orders"
-        f" WHERE {column} LIKE ? ESCAPE '\\' COLLATE NOCASE"
-    )
-    if open_only:
-        q += " AND done_at IS NULL"
-    q += f" GROUP BY lower(trim({column})) ORDER BY latest DESC LIMIT 25"
-    escaped = prefix.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
-    return [r[column] for r in conn.execute(q, (f"%{escaped}%",)).fetchall()]
 
 
 def add_request(conn, item, who, start=None, end=None):
@@ -244,9 +206,12 @@ def fmt_window(start, end):
 
 
 def order_text(r):
+    # Legacy rows had structured customer/qty/needed-by fields; new rows
+    # are the line exactly as someone typed it.
+    prefix = f"**{r['account']}**: " if r["account"] else ""
     needed = f" · needed {fmt_date(r['needed_by'])}" if r["needed_by"] else ""
     return (
-        f"**{r['account']}**: {fmt_qty(r['amount'], r['unit'], r['item'])}{needed}"
+        f"{prefix}{fmt_qty(r['amount'], r['unit'], r['item'])}{needed}"
         f" · {r['entered_by']} · {fmt_date(r['created_at'])}"
     )
 
@@ -451,33 +416,22 @@ class WholesaleModal(discord.ui.Modal, title="Wholesale orders"):
     entries = discord.ui.TextInput(
         label="One order per line",
         style=discord.TextStyle.paragraph,
-        placeholder="Joe's Cafe: 25 lb Sawmill, 2 cases Guji, May 20",
+        placeholder="wholesale order",
         max_length=1500,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        lines = [l for l in str(self.entries).splitlines() if l.strip()]
-        parsed, bad = [], []
-        for line in lines:
-            try:
-                parsed.append(parse_order_line(line))
-            except ValueError:
-                bad.append(line)
-        if bad or not parsed:
+        lines = [l.strip() for l in str(self.entries).splitlines() if l.strip()]
+        if not lines:
             await interaction.response.send_message(
-                "Every line should look like"
-                " `customer: items, needed by` — couldn't read:\n"
-                + "\n".join(f"- {l}" for l in (bad or ["(nothing entered)"])),
-                ephemeral=True,
+                "Nothing entered.", ephemeral=True
             )
             return
         who = interaction.user.display_name
         d = db_for(interaction)
-        out = [f"Logged by {who}:"]
-        for customer, items, needed in parsed:
-            add_order(d, customer, items, who, needed)
-            tail = f" · needed {fmt_date(needed)}" if needed else ""
-            out.append(f"- **{customer}**: {items}{tail}")
+        for line in lines:
+            add_order(d, "", line, who)
+        out = [f"Logged by {who}:"] + [f"- {l}" for l in lines]
         await interaction.response.send_message("\n".join(out))
 
 
@@ -520,27 +474,18 @@ def db_for(interaction) -> sqlite3.Connection:
     return test_db
 
 
-async def account_autocomplete(interaction, current: str):
-    return [
-        app_commands.Choice(name=v[:100], value=v[:100])
-        for v in distinct_values(db_for(interaction), "account", current)
-    ]
-
-
 @bot.tree.command(description="Log a wholesale order (opens a form)")
 async def wholesale(interaction: discord.Interaction):
     await interaction.response.send_modal(WholesaleModal())
 
 
-@bot.tree.command(description="List open (unchecked) wholesale order lines")
-@app_commands.describe(account="Only this account (optional)")
-@app_commands.autocomplete(account=account_autocomplete)
-async def orders(interaction: discord.Interaction, account: str | None = None):
+@bot.tree.command(description="List open (unchecked) wholesale orders")
+async def orders(interaction: discord.Interaction):
     await interaction.response.defer()
-    rows = open_orders(db_for(interaction), account)
-    heading = "Open order lines" + (f" — {account.strip()}" if account else "") + ":"
+    rows = open_orders(db_for(interaction))
     await send_row_list(
-        interaction, "ord", rows, heading, f"{heading}\nNothing open.", "orders.txt"
+        interaction, "ord", rows, "Open wholesale orders:",
+        "No open wholesale orders.", "orders.txt",
     )
 
 
