@@ -487,19 +487,11 @@ def db_for(interaction) -> sqlite3.Connection:
     return test_db
 
 
-@bot.tree.command(description="Log a wholesale order (opens a form)")
-async def wholesale(interaction: discord.Interaction):
-    await interaction.response.send_modal(WholesaleModal())
-
-
-@bot.tree.command(description="List open (unchecked) wholesale orders")
-async def orders(interaction: discord.Interaction):
-    await interaction.response.defer()
-    rows = open_orders(db_for(interaction))
-    await send_row_list(
-        interaction, "ord", rows, "Open wholesale orders:",
-        "No open wholesale orders.", "orders.txt",
-    )
+# Wholesale slash commands are parked while the captain rethinks the
+# workflow — the modal, storage, rendering, and ✓ handling all stay
+# live (old order-list buttons keep working); only the /wholesale,
+# /orders, and /clear-wholesale registrations are gone. To bring them
+# back, re-add three thin @bot.tree.command wrappers.
 
 
 @bot.tree.command(
@@ -516,19 +508,6 @@ async def requests(interaction: discord.Interaction):
     rows = open_requests(db_for(interaction))
     await send_row_list(
         interaction, "req", rows, "Open requests:", "No open requests.", "requests.txt"
-    )
-
-
-@bot.tree.command(
-    name="clear-wholesale",
-    description="Clear checked-off order lines out of /orders",
-)
-async def clear_wholesale(interaction: discord.Interaction):
-    await interaction.response.defer()
-    n = clear_done(db_for(interaction), "orders")
-    await interaction.followup.send(
-        f"Cleared {n} checked-off order line{'s' if n != 1 else ''}."
-        " (History is kept — nothing is deleted.)"
     )
 
 
