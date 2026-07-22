@@ -18,9 +18,7 @@ Environment:
 """
 
 import io
-import math
 import os
-import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -44,7 +42,8 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at TEXT NOT NULL,
     done_at    TEXT,
     done_by    TEXT,
-    cleared_at TEXT
+    cleared_at TEXT,
+    needed_by  TEXT
 );
 CREATE TABLE IF NOT EXISTS requests (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,8 +73,9 @@ def connect(path: str = DB_PATH) -> sqlite3.Connection:
         if col not in cols:
             conn.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(orders)")}
-    if "cleared_at" not in cols:
-        conn.execute("ALTER TABLE orders ADD COLUMN cleared_at TEXT")
+    for col in ("cleared_at", "needed_by"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE orders ADD COLUMN {col} TEXT")
     conn.commit()
     return conn
 
@@ -120,27 +120,36 @@ def fmt_qty(amount, unit, item) -> str:
     return f"{fmt_amount(amount)} {item}"
 
 
-ITEM_LINE = re.compile(r"^(\d+(?:\.\d+)?)\s+(\S+)\s+(.+)$")
-
-
-def parse_item_line(line):
-    """'25 lbs Sawmill' -> (25.0, 'lbs', 'Sawmill'); no leading number ->
-    the whole line as the item (amount 1, no unit)."""
-    line = line.strip()
-    m = ITEM_LINE.match(line)
-    if m and valid_amount(float(m.group(1))):
-        return float(m.group(1)), m.group(2), m.group(3).strip()
-    return 1.0, "", line
+def parse_order_line(line):
+    """'Joe's: 25 lb Sawmill, 2 cases Guji, May 20' ->
+    ('Joe's', '25 lb Sawmill, 2 cases Guji', '<iso date>').
+    The needed-by date is optional; raises ValueError on a line without
+    a 'customer:' prefix or without items."""
+    if ":" not in line:
+        raise ValueError(line)
+    customer, rest = line.split(":", 1)
+    customer = customer.strip()
+    parts = [p.strip() for p in rest.split(",") if p.strip()]
+    needed = None
+    if len(parts) > 1:
+        try:
+            needed = parse_date(parts[-1])
+            parts = parts[:-1]
+        except ValueError:
+            pass
+    if not customer or not parts:
+        raise ValueError(line)
+    return customer, ", ".join(parts), needed
 
 
 # ---- db operations (plain functions so they can be tested without Discord)
 
 
-def add_order(conn, account, item, amount, unit, who):
+def add_order(conn, account, item, who, needed_by=None):
     cur = conn.execute(
-        "INSERT INTO orders (account, item, amount, unit, entered_by, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (account.strip(), item.strip(), amount, unit.strip(), who, now()),
+        "INSERT INTO orders (account, item, amount, unit, entered_by,"
+        " created_at, needed_by) VALUES (?, ?, 1, '', ?, ?, ?)",
+        (account.strip(), item.strip(), who, now(), needed_by),
     )
     conn.commit()
     return cur.lastrowid
@@ -235,8 +244,9 @@ def fmt_window(start, end):
 
 
 def order_text(r):
+    needed = f" · needed {fmt_date(r['needed_by'])}" if r["needed_by"] else ""
     return (
-        f"**{r['account']}** — {fmt_qty(r['amount'], r['unit'], r['item'])}"
+        f"**{r['account']}**: {fmt_qty(r['amount'], r['unit'], r['item'])}{needed}"
         f" · {r['entered_by']} · {fmt_date(r['created_at'])}"
     )
 
@@ -268,10 +278,6 @@ def render_requests(rows):
 
 
 # ---- discord plumbing
-
-def valid_amount(amount: float) -> bool:
-    return math.isfinite(amount) and 0 < amount <= 1_000_000
-
 
 async def reply(interaction: discord.Interaction, text: str, filename: str = "list.txt"):
     """Send text, falling back to a file attachment past Discord's limit."""
@@ -441,33 +447,38 @@ class RequestModal(discord.ui.Modal, title="Request"):
         )
 
 
-class WholesaleModal(discord.ui.Modal, title="Wholesale order"):
-    account = discord.ui.TextInput(label="Account name", max_length=100)
-    items = discord.ui.TextInput(
-        label="Items (one per line)",
+class WholesaleModal(discord.ui.Modal, title="Wholesale orders"):
+    entries = discord.ui.TextInput(
+        label="One order per line",
         style=discord.TextStyle.paragraph,
-        placeholder="25 lbs Sawmill\n2 cases Ethiopia Guji\nlines without a leading number are fine too",
+        placeholder="Joe's Cafe: 25 lb Sawmill, 2 cases Guji, May 20",
         max_length=1500,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        account = str(self.account).strip()
-        item_lines = [l for l in str(self.items).splitlines() if l.strip()]
-        if not account or not item_lines:
+        lines = [l for l in str(self.entries).splitlines() if l.strip()]
+        parsed, bad = [], []
+        for line in lines:
+            try:
+                parsed.append(parse_order_line(line))
+            except ValueError:
+                bad.append(line)
+        if bad or not parsed:
             await interaction.response.send_message(
-                "Need an account name and at least one item line.", ephemeral=True
+                "Every line should look like"
+                " `customer: items, needed by` — couldn't read:\n"
+                + "\n".join(f"- {l}" for l in (bad or ["(nothing entered)"])),
+                ephemeral=True,
             )
             return
         who = interaction.user.display_name
         d = db_for(interaction)
-        rows = []
-        for line in item_lines:
-            amount, unit, item = parse_item_line(line)
-            oid = add_order(d, account, item, amount, unit, who)
-            rows.append({"id": oid, "text": fmt_qty(amount, unit, item)})
-        lines = [f"**{account}** — logged by {who}:"]
-        lines += [f"- {r['text']}" for r in rows]
-        await interaction.response.send_message("\n".join(lines))
+        out = [f"Logged by {who}:"]
+        for customer, items, needed in parsed:
+            add_order(d, customer, items, who, needed)
+            tail = f" · needed {fmt_date(needed)}" if needed else ""
+            out.append(f"- **{customer}**: {items}{tail}")
+        await interaction.response.send_message("\n".join(out))
 
 
 class Bot(discord.Client):
