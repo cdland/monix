@@ -113,7 +113,13 @@
 
           This is the $slot digest. Right now it is $(date '+%A %B %-d %Y, %H:%M %Z').
           EOF
-          )
+          ) || {
+            # claude prints its errors to stdout, which the capture above
+            # swallows — surface them or failures are silent in the journal
+            # (bit us 2026-07-22: token rejection logged nothing).
+            echo "claude -p failed: $text" >&2
+            exit 1
+          }
           [ -n "$text" ] || { echo "empty digest from claude" >&2; exit 1; }
           # Belt-and-braces against agent narration leaking in ("Now I
           # have everything..."): the digest proper starts at the 🗞
