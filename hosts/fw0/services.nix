@@ -43,8 +43,14 @@
 
   # Media stack (media.mod.nix): Jellyfin + Sonarr/Radarr/Bazarr/Prowlarr/
   # SABnzbd, tailnet-only and egress-fenced. Tree at /srv/media pending the
-  # future RAID array. Provider/indexer accounts wire up in the web UIs.
+  # future RAID array. *arr wiring is web-UI state; SABnzbd is declarative
+  # (read-only ini) with credentials bootstrap-gated until the secret exists.
   media.enable = true;
+  media.sabnzbdSecretsFile =
+    if builtins.pathExists ./secrets/sabnzbd-secrets.ini.age then
+      config.secrets.sabnzbd-secrets.path
+    else
+      null;
 
   # Local inference: llama.cpp (Vulkan) behind llama-swap on :8091,
   # tailnet-only, with models loaded on demand.
@@ -180,6 +186,12 @@
       file = ./secrets/openrouter-management-key.age;
       owner = config.primaryUser;
     };
+  }
+  // lib.optionalAttrs (builtins.pathExists ./secrets/sabnzbd-secrets.ini.age) {
+    sabnzbd-secrets = {
+      file = ./secrets/sabnzbd-secrets.ini.age;
+      owner = "sabnzbd";
+    };
   };
 
   # agenix in this input has no restartUnits option; make the encrypted
@@ -190,6 +202,10 @@
   systemd.services.matrix-tunnel.restartTriggers = [
     ./secrets/matrix-cloudflare-tunnel-token.age
   ];
+  systemd.services.sabnzbd.restartTriggers =
+    lib.lists.optionals (builtins.pathExists ./secrets/sabnzbd-secrets.ini.age) [
+      ./secrets/sabnzbd-secrets.ini.age
+    ];
 
   agentFleet.credentials = {
     claudeTokenFile = config.secrets.agent-claude-token.path;

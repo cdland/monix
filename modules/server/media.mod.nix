@@ -37,8 +37,10 @@
       ...
     }:
     let
+      inherit (lib) types;
+      inherit (lib.lists) singleton;
       inherit (lib.modules) mkIf;
-      inherit (lib.options) mkEnableOption;
+      inherit (lib.options) mkEnableOption mkOption;
 
       cfg = config.media;
       networkFences = import ../../lib/network-fences.nix;
@@ -67,7 +69,20 @@
       };
     in
     {
-      options.media.enable = mkEnableOption "the tailnet-only Jellyfin + Usenet automation media stack";
+      options.media = {
+        enable = mkEnableOption "the tailnet-only Jellyfin + Usenet automation media stack";
+
+        sabnzbdSecretsFile = mkOption {
+          type = types.nullOr types.path;
+          default = null;
+          description = ''
+            Path to an agenix-decrypted INI (readable by the sabnzbd user)
+            merged over the declarative SABnzbd settings at unit start.
+            Carries misc.api_key / misc.nzb_key and the Usenet provider
+            credentials (servers.newshosting.username/password).
+          '';
+        };
+      };
 
       config = mkIf cfg.enable {
         # THE SHARED GROUP. Every service that touches the media tree runs
@@ -118,10 +133,44 @@
         };
 
         # --- The downloader: NNTP fetch, par2 repair, unpack ---
+        # The new-style module keeps the ini READ-ONLY and stamps it from Nix
+        # on every start (allowConfigWrite defaults off at stateVersion
+        # >= 26.05) — the web UI cannot save settings, so everything is
+        # declared here. Secrets (API keys, provider credentials) come in via
+        # media.sabnzbdSecretsFile, merged with precedence at unit start.
         services.sabnzbd = {
           enable = true;
           group = "media";
           openFirewall = false; # tailnet-only (UI on :8080)
+
+          secretFiles = mkIf (cfg.sabnzbdSecretsFile != null) (singleton cfg.sabnzbdSecretsFile);
+
+          settings.misc = {
+            # Bind everywhere; reachability is the firewall's job (the fw0
+            # pattern). The tailnet counts as LOCAL below, so the web UI is
+            # open from the tailnet with inet_exposure staying at its "none"
+            # default — non-local access remains fully denied (and firewalled).
+            host = "0.0.0.0";
+            local_ranges = "127.0.0.1, ::1, 100.64.0.0/10";
+
+            # The media tree (see STORAGE in the header). Group-readable
+            # completes so the *arr importers (media group) can hardlink.
+            download_dir = "${mediaRoot}/downloads/incomplete";
+            complete_dir = "${mediaRoot}/downloads/complete";
+            permissions = "775";
+          };
+
+          # Newshosting (captain's provider, 2026-07-23). NNTPS on 563;
+          # username/password merge in from the secrets INI.
+          settings.servers.newshosting = {
+            name = "newshosting";
+            displayname = "Newshosting";
+            host = "news.newshosting.com";
+            port = 563;
+            ssl = true;
+            connections = 30;
+            enable = true;
+          };
         };
 
         # --- Playback ---
